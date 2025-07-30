@@ -15,9 +15,15 @@ authors = [
 dependencies = [
     "llama-index-core>=0.12.0",
     "llama-index-llms-openai>=0.3.0",
-    "llama-index-embeddings-openai>=0.3.0", 
+    "llama-index-llms-ollama>=0.3.0",
+    "llama-index-embeddings-huggingface>=0.3.0",
+    "sentence-transformers>=2.2.0",
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "requests>=2.25.0",
     "python-dotenv>=1.0.0",
     "rich>=13.0.0",
+    "llama-index-llms-deepseek>=0.1.2",
 ]
 
 [project.optional-dependencies]

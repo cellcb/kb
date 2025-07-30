@@ -21,12 +21,17 @@ from llama_index.core import (
     load_index_from_storage,
 )
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.llms.openai import OpenAI
-from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.deepseek import DeepSeek
+from llama_index.core.llms import CompletionResponse, CompletionResponseGen, LLMMetadata
+from llama_index.core.llms.callbacks import llm_completion_callback
+import requests
+from typing import Any
 
 
 class RAGDemo:
-    def __init__(self, data_dir: str = "data", persist_dir: str = "storage"):
+    def __init__(self, data_dir: str = "data", persist_dir: str = "storage", 
+                 embedding_model: str = "BAAI/bge-small-zh-v1.5"):
         """初始化RAG演示系统"""
         self.data_dir = Path(data_dir)
         self.persist_dir = Path(persist_dir)
@@ -34,12 +39,45 @@ class RAGDemo:
         self.index = None
         
         # 加载环境变量
-        load_dotenv()
+        # load_dotenv()
         
-        # 配置LlamaIndex设置
-        Settings.llm = OpenAI(model="gpt-3.5-turbo", temperature=0.1)
-        Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+        # 配置LlamaIndex设置 - 使用自定义DeepSeek LLM
+        Settings.llm = DeepSeek(
+            model="deepseek-chat",
+            api_key="sk-61daa89199674a819f3178ac1146d397",
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            temperature=0.1
+        )
+        
+        # 使用本地embedding模型
+        self._setup_embedding_model(embedding_model)
         Settings.node_parser = SentenceSplitter(chunk_size=1024, chunk_overlap=20)
+        
+    def _setup_embedding_model(self, model_name: str):
+        """配置embedding模型"""
+        self.console.print(f"[blue]正在加载embedding模型: {model_name}[/blue]")
+        
+        # 预定义的模型映射，包含中英文模型
+        model_info = {
+            "BAAI/bge-small-zh-v1.5": "BGE小型中文模型 (推荐中文使用)",
+            "BAAI/bge-base-zh-v1.5": "BGE基础中文模型 (更好效果但更大)",
+            "sentence-transformers/all-MiniLM-L6-v2": "轻量级英文模型 (快速)",
+            "sentence-transformers/all-mpnet-base-v2": "高质量英文模型",
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": "多语言模型",
+        }
+        
+        if model_name in model_info:
+            self.console.print(f"[green]使用模型: {model_info[model_name]}[/green]")
+        
+        try:
+            Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
+            self.console.print(f"[green]Embedding模型加载成功[/green]")
+        except Exception as e:
+            self.console.print(f"[red]加载embedding模型失败: {e}[/red]")
+            self.console.print("[yellow]尝试使用默认的轻量级模型...[/yellow]")
+            Settings.embed_model = HuggingFaceEmbedding(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
         
     def load_documents(self) -> List[Document]:
         """从数据目录加载文档"""
@@ -204,17 +242,47 @@ def main():
     parser.add_argument("--persist-dir", default="storage", help="索引存储目录")
     parser.add_argument("--query", help="直接查询而不进入交互模式")
     parser.add_argument("--rebuild", action="store_true", help="强制重建索引")
+    parser.add_argument("--embedding-model", default="BAAI/bge-small-zh-v1.5", 
+                        help="Embedding模型名称 (默认: BAAI/bge-small-zh-v1.5)")
+    parser.add_argument("--list-models", action="store_true", 
+                        help="列出推荐的embedding模型")
+    parser.add_argument("--test-embedding", action="store_true",
+                        help="测试embedding模型（无需API密钥）")
     
     args = parser.parse_args()
     
-    # 检查OpenAI API密钥
-    if not os.getenv("OPENAI_API_KEY"):
-        print("错误: 请设置 OPENAI_API_KEY 环境变量")
-        print("你可以在 .env 文件中设置: OPENAI_API_KEY=your_api_key_here")
+    # 列出模型选项
+    if args.list_models:
+        print("\n推荐的Embedding模型:")
+        models = {
+            "BAAI/bge-small-zh-v1.5": "BGE小型中文模型 (推荐中文使用) - 轻量快速",
+            "BAAI/bge-base-zh-v1.5": "BGE基础中文模型 - 更好效果但更大",
+            "sentence-transformers/all-MiniLM-L6-v2": "轻量级英文模型 - 快速加载",
+            "sentence-transformers/all-mpnet-base-v2": "高质量英文模型 - 最佳效果",
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": "多语言支持模型",
+        }
+        for model, desc in models.items():
+            print(f"  {model}: {desc}")
+        print("\n使用方法: --embedding-model MODEL_NAME")
         return
     
+    # 测试embedding模型
+    if args.test_embedding:
+        test_embedding_model(args.embedding_model)
+        return
+    
+    # 检查OpenAI API密钥
+    # if not os.getenv("OPENAI_API_KEY"):
+    #     print("错误: 请设置 OPENAI_API_KEY 环境变量")
+    #     print("你可以在 .env 文件中设置: OPENAI_API_KEY=your_api_key_here")
+    #     return
+    
     # 初始化RAG系统
-    rag = RAGDemo(data_dir=args.data_dir, persist_dir=args.persist_dir)
+    rag = RAGDemo(
+        data_dir=args.data_dir, 
+        persist_dir=args.persist_dir,
+        embedding_model=args.embedding_model
+    )
     
     try:
         if args.rebuild:
@@ -235,6 +303,83 @@ def main():
             
     except Exception as e:
         rag.console.print(f"[red]启动失败: {e}[/red]")
+
+
+def test_embedding_model(model_name: str):
+    """测试embedding模型功能"""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    import numpy as np
+    
+    console = Console()
+    
+    console.print(Panel.fit(
+        f"[bold blue]测试 Embedding 模型: {model_name}[/bold blue]",
+        title="Embedding 测试"
+    ))
+    
+    try:
+        # 加载模型
+        console.print(f"[blue]正在加载模型: {model_name}[/blue]")
+        embed_model = HuggingFaceEmbedding(model_name=model_name)
+        console.print("[green]✓ 模型加载成功[/green]")
+        
+        # 测试文本
+        test_texts = [
+            "机器学习是人工智能的一个分支",
+            "深度学习使用神经网络进行学习",
+            "自然语言处理专注于计算机理解人类语言",
+            "今天天气很好，适合出门散步",
+            "Machine learning is a subset of artificial intelligence"
+        ]
+        
+        console.print("\n[blue]计算文本向量...[/blue]")
+        embeddings = []
+        
+        for i, text in enumerate(test_texts):
+            embedding = embed_model.get_text_embedding(text)
+            embeddings.append(embedding)
+            console.print(f"[green]✓ 文本 {i+1}: 向量维度 {len(embedding)}[/green]")
+        
+        # 计算相似度
+        console.print("\n[blue]计算文本相似度...[/blue]")
+        
+        def cosine_similarity(a, b):
+            return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+        
+        # 创建相似度表格
+        table = Table(title="文本相似度矩阵 (前3个AI相关文本)")
+        table.add_column("文本", style="cyan", no_wrap=True)
+        for i in range(3):
+            table.add_column(f"文本{i+1}", justify="center")
+        
+        ai_texts = test_texts[:3]
+        ai_embeddings = embeddings[:3]
+        
+        for i, text in enumerate(ai_texts):
+            row = [f"文本{i+1}: {text[:20]}..."]
+            for j in range(3):
+                similarity = cosine_similarity(ai_embeddings[i], ai_embeddings[j])
+                color = "red" if similarity > 0.8 else "yellow" if similarity > 0.6 else "white"
+                row.append(f"[{color}]{similarity:.3f}[/{color}]")
+            table.add_row(*row)
+        
+        console.print(table)
+        
+        # 显示跨语言相似度
+        if len(embeddings) >= 5:
+            cn_ml = embeddings[0]  # 中文机器学习
+            en_ml = embeddings[4]  # 英文机器学习
+            cross_lang_sim = cosine_similarity(cn_ml, en_ml)
+            
+            console.print(f"\n[bold yellow]跨语言相似度测试:[/bold yellow]")
+            console.print(f"中文'机器学习' vs 英文'Machine learning': [bold green]{cross_lang_sim:.3f}[/bold green]")
+        
+        console.print(f"\n[bold green]✅ Embedding模型 {model_name} 测试完成！[/bold green]")
+        
+    except Exception as e:
+        console.print(f"[red]❌ 测试失败: {e}[/red]")
 
 
 if __name__ == "__main__":
