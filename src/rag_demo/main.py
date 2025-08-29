@@ -5,7 +5,7 @@ Simple demonstration of Retrieval-Augmented Generation
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import argparse
 
 from dotenv import load_dotenv
@@ -22,11 +22,10 @@ from llama_index.core import (
 )
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.deepseek import DeepSeek
+from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.llms import CompletionResponse, CompletionResponseGen, LLMMetadata
 from llama_index.core.llms.callbacks import llm_completion_callback
 import requests
-from typing import Any
 
 
 class RAGDemo:
@@ -42,10 +41,11 @@ class RAGDemo:
         # load_dotenv()
         
         # 配置LlamaIndex设置 - 使用自定义DeepSeek LLM
-        Settings.llm = DeepSeek(
-            model="deepseek-chat",
-            api_key="sk-61daa89199674a819f3178ac1146d397",
-            base_url="https://ark.cn-beijing.volces.com/api/v3",
+        Settings.llm = OpenAILike(
+            model="deepseek-v3-250324",
+            api_key="155d5cb5-6b83-4d52-8be8-eb795c72ad44",
+            api_base="https://ark.cn-beijing.volces.com/api/v3",
+            is_chat_model=True,
             temperature=0.1
         )
         
@@ -189,14 +189,43 @@ class RAGDemo:
         self.index = index
         return index
     
-    def query(self, question: str) -> str:
-        """查询RAG系统"""
+    def query(self, question: str) -> Dict[str, Any]:
+        """查询RAG系统并返回答案和来源文档"""
         if self.index is None:
             self.get_or_create_index()
         
         query_engine = self.index.as_query_engine(response_mode="compact")
         response = query_engine.query(question)
-        return str(response)
+        
+        # 提取来源文档信息
+        sources = []
+        if hasattr(response, 'source_nodes') and response.source_nodes:
+            for node in response.source_nodes:
+                source_info = {
+                    'filename': node.metadata.get('filename', '未知文档'),
+                    'content_preview': node.text[:100] + "..." if len(node.text) > 100 else node.text,
+                    'score': getattr(node, 'score', None)
+                }
+                sources.append(source_info)
+        
+        return {
+            'answer': str(response),
+            'sources': sources
+        }
+    
+    def _format_sources(self, sources: List[Dict[str, Any]]) -> str:
+        """格式化来源文档信息"""
+        if not sources:
+            return "\n[dim]未找到参考文档[/dim]"
+        
+        formatted = "\n[bold yellow]📚 参考文档:[/bold yellow]\n"
+        for i, source in enumerate(sources, 1):
+            formatted += f"[cyan]{i}. {source['filename']}[/cyan]\n"
+            formatted += f"   {source['content_preview']}\n"
+            if source.get('score'):
+                formatted += f"   [dim]相关度: {source['score']:.3f}[/dim]\n"
+        
+        return formatted
     
     def interactive_chat(self):
         """交互式聊天界面"""
@@ -221,13 +250,18 @@ class RAGDemo:
                     continue
                 
                 self.console.print("[blue]正在搜索答案...[/blue]")
-                answer = self.query(question)
+                result = self.query(question)
                 
+                # 显示答案
                 self.console.print(Panel(
-                    answer,
+                    result['answer'],
                     title="[bold green]回答[/bold green]",
                     border_style="green"
                 ))
+                
+                # 显示来源文档
+                sources_text = self._format_sources(result['sources'])
+                self.console.print(sources_text)
                 
             except KeyboardInterrupt:
                 self.console.print("\n[yellow]再见！[/yellow]")
@@ -291,12 +325,16 @@ def main():
         
         if args.query:
             # 直接查询模式
-            answer = rag.query(args.query)
+            result = rag.query(args.query)
             rag.console.print(Panel(
-                answer,
+                result['answer'],
                 title="[bold green]回答[/bold green]",
                 border_style="green"
             ))
+            
+            # 显示来源文档
+            sources_text = rag._format_sources(result['sources'])
+            rag.console.print(sources_text)
         else:
             # 交互模式
             rag.interactive_chat()
