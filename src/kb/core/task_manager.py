@@ -1,0 +1,281 @@
+"""
+Task Manager for Async Document Processing
+"""
+
+import asyncio
+import uuid
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Callable, Any
+from pathlib import Path
+from dataclasses import dataclass, field
+
+from ..api.models.documents import TaskStatus, DocumentStatus, TaskInfo, DocumentInfo, TaskProgress
+
+
+@dataclass
+class TaskData:
+    """任务数据"""
+    task_id: str
+    files: List[Path]
+    options: Dict[str, Any] = field(default_factory=dict)
+    status: TaskStatus = TaskStatus.QUEUED
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    progress: Dict[str, Any] = field(default_factory=dict)
+    results: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+class TaskManager:
+    """异步任务管理器"""
+    
+    def __init__(self, max_concurrent_tasks: int = 3):
+        self.active_tasks: Dict[str, TaskData] = {}
+        self.task_queue = asyncio.Queue()
+        self.max_concurrent_tasks = max_concurrent_tasks
+        self.logger = self._setup_logger()
+        self._workers_running = False
+        self._worker_tasks: List[asyncio.Task] = []
+        
+    def _setup_logger(self) -> logging.Logger:
+        """配置日志记录器"""
+        logger = logging.getLogger(f"{__name__}.TaskManager")
+        logger.setLevel(logging.INFO)
+        
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            
+        return logger
+    
+    def _generate_task_id(self) -> str:
+        """生成唯一任务ID"""
+        return f"task_{uuid.uuid4().hex[:8]}"
+    
+    async def start_workers(self):
+        """启动工作线程"""
+        if self._workers_running:
+            return
+            
+        self._workers_running = True
+        self.logger.info(f"启动 {self.max_concurrent_tasks} 个任务工作线程")
+        
+        for i in range(self.max_concurrent_tasks):
+            worker_task = asyncio.create_task(self._worker(f"worker-{i}"))
+            self._worker_tasks.append(worker_task)
+    
+    async def stop_workers(self):
+        """停止工作线程"""
+        if not self._workers_running:
+            return
+            
+        self._workers_running = False
+        
+        # 取消所有工作任务
+        for worker_task in self._worker_tasks:
+            worker_task.cancel()
+        
+        # 等待所有任务完成
+        await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+        self._worker_tasks.clear()
+        
+        self.logger.info("所有任务工作线程已停止")
+    
+    async def _worker(self, worker_name: str):
+        """工作线程处理任务"""
+        self.logger.info(f"工作线程 {worker_name} 启动")
+        
+        try:
+            while self._workers_running:
+                try:
+                    # 等待任务，如果5秒内没有任务就继续循环
+                    task_data = await asyncio.wait_for(
+                        self.task_queue.get(), timeout=5.0
+                    )
+                    
+                    await self._process_task(task_data, worker_name)
+                    
+                except asyncio.TimeoutError:
+                    # 没有任务，继续等待
+                    continue
+                except Exception as e:
+                    self.logger.error(f"工作线程 {worker_name} 处理任务时出错: {e}")
+                    
+        except asyncio.CancelledError:
+            self.logger.info(f"工作线程 {worker_name} 被取消")
+        except Exception as e:
+            self.logger.error(f"工作线程 {worker_name} 异常退出: {e}")
+    
+    async def _process_task(self, task_data: TaskData, worker_name: str):
+        """处理单个任务"""
+        task_id = task_data.task_id
+        self.logger.info(f"工作线程 {worker_name} 开始处理任务 {task_id}")
+        
+        try:
+            # 更新任务状态
+            task_data.status = TaskStatus.PROCESSING
+            task_data.start_time = datetime.now()
+            task_data.progress = {
+                'total_files': len(task_data.files),
+                'processed': 0,
+                'failed': 0,
+                'current_file': None,
+                'percentage': 0
+            }
+            
+            # 这里应该调用实际的文档处理逻辑
+            # 暂时使用模拟处理
+            await self._simulate_document_processing(task_data)
+            
+            # 任务完成
+            task_data.status = TaskStatus.COMPLETED
+            task_data.end_time = datetime.now()
+            task_data.progress['percentage'] = 100
+            
+            self.logger.info(f"任务 {task_id} 处理完成")
+            
+        except Exception as e:
+            task_data.status = TaskStatus.FAILED
+            task_data.end_time = datetime.now()
+            task_data.error = str(e)
+            self.logger.error(f"任务 {task_id} 处理失败: {e}")
+    
+    async def _simulate_document_processing(self, task_data: TaskData):
+        """模拟文档处理（稍后替换为真实处理逻辑）"""
+        files = task_data.files
+        total_files = len(files)
+        
+        for i, file_path in enumerate(files):
+            # 模拟处理时间
+            await asyncio.sleep(1)  # 模拟1秒处理时间
+            
+            # 更新进度
+            task_data.progress['processed'] = i + 1
+            task_data.progress['current_file'] = file_path.name
+            task_data.progress['percentage'] = (i + 1) / total_files * 100
+            
+            # 模拟处理结果
+            doc_info = {
+                'document_id': f"doc_{uuid.uuid4().hex[:8]}",
+                'filename': file_path.name,
+                'upload_time': datetime.now(),
+                'file_size': file_path.stat().st_size if file_path.exists() else 0,
+                'status': DocumentStatus.INDEXED,
+                'char_count': 1000,  # 模拟字符数
+                'processing_time': "1s",
+                'error': None
+            }
+            
+            task_data.results.append(doc_info)
+    
+    async def submit_task(self, 
+                         files: List[Path], 
+                         options: Optional[Dict[str, Any]] = None) -> str:
+        """提交文档处理任务"""
+        task_id = self._generate_task_id()
+        
+        task_data = TaskData(
+            task_id=task_id,
+            files=files,
+            options=options or {},
+            status=TaskStatus.QUEUED
+        )
+        
+        self.active_tasks[task_id] = task_data
+        await self.task_queue.put(task_data)
+        
+        self.logger.info(f"任务 {task_id} 已提交，包含 {len(files)} 个文件")
+        return task_id
+    
+    def get_task_status(self, task_id: str) -> Optional[TaskInfo]:
+        """获取任务状态"""
+        task_data = self.active_tasks.get(task_id)
+        if not task_data:
+            return None
+        
+        # 构建进度信息
+        progress = TaskProgress(
+            total_files=task_data.progress.get('total_files', 0),
+            processed=task_data.progress.get('processed', 0),
+            failed=task_data.progress.get('failed', 0),
+            current_file=task_data.progress.get('current_file'),
+            percentage=task_data.progress.get('percentage', 0)
+        )
+        
+        # 构建文档信息列表
+        results = []
+        for result_data in task_data.results:
+            doc_info = DocumentInfo(
+                document_id=result_data['document_id'],
+                filename=result_data['filename'],
+                upload_time=result_data['upload_time'],
+                file_size=result_data['file_size'],
+                status=result_data['status'],
+                char_count=result_data.get('char_count'),
+                processing_time=result_data.get('processing_time'),
+                error=result_data.get('error')
+            )
+            results.append(doc_info)
+        
+        return TaskInfo(
+            task_id=task_id,
+            status=task_data.status,
+            progress=progress,
+            results=results,
+            parallel_workers=task_data.options.get('parallel_workers', 4),
+            start_time=task_data.start_time or datetime.now(),
+            end_time=task_data.end_time,
+            error=task_data.error
+        )
+    
+    def list_active_tasks(self) -> List[str]:
+        """列出所有活跃任务ID"""
+        return list(self.active_tasks.keys())
+    
+    def get_active_task_count(self) -> int:
+        """获取活跃任务数量"""
+        return len([
+            task for task in self.active_tasks.values()
+            if task.status in [TaskStatus.QUEUED, TaskStatus.PROCESSING]
+        ])
+    
+    async def cleanup_completed_tasks(self, max_age_hours: int = 24):
+        """清理已完成的旧任务"""
+        current_time = datetime.now()
+        tasks_to_remove = []
+        
+        for task_id, task_data in self.active_tasks.items():
+            if (task_data.status in [TaskStatus.COMPLETED, TaskStatus.FAILED] and
+                task_data.end_time and
+                (current_time - task_data.end_time).total_seconds() > max_age_hours * 3600):
+                tasks_to_remove.append(task_id)
+        
+        for task_id in tasks_to_remove:
+            del self.active_tasks[task_id]
+            self.logger.info(f"清理旧任务: {task_id}")
+    
+    def get_system_stats(self) -> Dict[str, Any]:
+        """获取系统统计信息"""
+        active_count = self.get_active_task_count()
+        completed_count = len([
+            task for task in self.active_tasks.values()
+            if task.status == TaskStatus.COMPLETED
+        ])
+        failed_count = len([
+            task for task in self.active_tasks.values()
+            if task.status == TaskStatus.FAILED
+        ])
+        
+        return {
+            'total_tasks': len(self.active_tasks),
+            'active_tasks': active_count,
+            'completed_tasks': completed_count,
+            'failed_tasks': failed_count,
+            'max_concurrent': self.max_concurrent_tasks,
+            'available_workers': max(0, self.max_concurrent_tasks - active_count)
+        }
