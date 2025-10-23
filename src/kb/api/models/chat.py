@@ -12,7 +12,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="会话ID")
     search_params: Optional[Dict[str, Any]] = Field(
         default_factory=lambda: {"top_k": 5, "min_score": 0.7},
-        description="搜索参数"
+        description="搜索参数，如 top_k、min_score、response_mode 等"
     )
 
 

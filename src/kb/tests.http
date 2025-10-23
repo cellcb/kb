@@ -1,0 +1,71 @@
+### RAG 同步查询
+POST http://localhost:8000/api/query
+Content-Type: application/json
+
+{
+  "message": "程波有机器学习的经验吗？",
+  "search_params": {
+    "top_k": 5,
+    "response_mode": "compact"
+  }
+}
+
+### RAG 流式查询（SSE）
+POST http://localhost:8000/api/query/stream
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "message": "狮民肋板水池有什么问题",
+  "search_params": {
+    "top_k": 5,
+    "response_mode": "compact"
+  }
+}
+
+### Elasticsearch 关键字查询
+POST http://localhost:8000/api/search
+Content-Type: application/json
+
+{
+  "message": "查找和 Elasticsearch 相关的内容",
+  "search_params": {
+    "top_k": 5,
+    "min_score": 0.5
+  }
+}
+
+### 外部文档摄取
+POST http://localhost:8000/api/documents/ingest
+Content-Type: application/json
+
+{
+  "documents": [
+    {
+      "document_id": "doc_external_001",
+      "filename": "external_sample.txt",
+      "content": "这是来自外部文档服务的示例内容，提交给搜索服务以便索引。",
+      "metadata": {
+        "source": "external-service",
+        "language": "zh"
+      }
+    }
+  ],
+  "reset_index": false
+}
+
+### 上传文件摄取 (请替换文件路径)
+POST http://localhost:8000/api/documents/ingest/upload
+Content-Type: multipart/form-data; boundary=BOUNDARY
+
+--BOUNDARY
+Content-Disposition: form-data; name="files"; filename="/Users/cell/Downloads/狮民肋板水池0915_t3-模型2.docx"
+Content-Type: text/plain
+
+< /Users/cell/Downloads/狮民肋板水池0915_t3-模型2.docx
+--BOUNDARY
+Content-Disposition: form-data; name="metadata"
+Content-Type: application/json
+
+{"/Users/cell/Downloads/狮民肋板水池0915_t3-模型2.docx": {"source": "http-client"}}
+--BOUNDARY--

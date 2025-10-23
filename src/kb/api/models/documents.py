@@ -4,7 +4,7 @@ Document API Models
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 
 
@@ -102,3 +102,44 @@ class ConfigUpdate(BaseModel):
     max_parallel_workers: Optional[int] = Field(None, ge=1, le=32, description="最大并行工作线程数")
     embedding_model: Optional[str] = Field(None, description="Embedding模型")
     chunk_size: Optional[int] = Field(None, ge=100, le=4096, description="文本分块大小")
+
+
+class IngestDocumentChunk(BaseModel):
+    """外部预处理的文档切片"""
+    content: str = Field(..., min_length=1, description="文本内容")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="切片级元数据")
+
+
+class IngestDocument(BaseModel):
+    """外部服务提交的文档"""
+    document_id: str = Field(..., description="文档唯一ID")
+    filename: Optional[str] = Field(None, description="原始文件名")
+    content: Optional[str] = Field(None, description="文档完整文本内容")
+    chunks: Optional[List[IngestDocumentChunk]] = Field(
+        None,
+        description="预切好的文本切片；若提供则优先生效",
+    )
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="文档级元数据")
+
+    @model_validator(mode="after")
+    def validate_content_or_chunks(cls, values):
+        content = values.content
+        chunks = values.chunks
+        if (content is None or not content.strip()) and not chunks:
+            raise ValueError("content 或 chunks 至少提供一个")
+        return values
+
+
+class IngestRequest(BaseModel):
+    """文档摄取请求"""
+    documents: List[IngestDocument] = Field(..., min_items=1, description="待索引的文档列表")
+    reset_index: bool = Field(False, description="是否重建现有索引")
+
+
+class IngestResponse(BaseModel):
+    """文档摄取响应"""
+    success: bool = Field(..., description="摄取是否成功")
+    indexed_documents: int = Field(..., description="处理的文档数量")
+    indexed_nodes: int = Field(..., description="写入向量索引的节点数")
+    keyword_chunks: int = Field(..., description="写入关键字索引的文本块数")
+    message: str = Field(..., description="提示信息")

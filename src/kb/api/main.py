@@ -119,7 +119,7 @@ app.include_router(tasks.router, prefix="/api", tags=["任务管理"])
 async def root():
     """根路径响应"""
     return {
-        "message": "RAG Demo API Service",
+        "message": "KB API Service",
         "version": "1.0.0",
         "docs": "/docs",
         "health": "/api/health"

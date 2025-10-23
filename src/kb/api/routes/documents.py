@@ -1,11 +1,10 @@
-"""
-Document Management API Routes
-"""
+"""Document Management API Routes"""
 
+import json
 import os
 import uuid
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
@@ -13,12 +12,131 @@ from fastapi.responses import JSONResponse
 
 from ..models.documents import (
     UploadResponse, DocumentListResponse, DocumentInfo, ProcessingOptions,
-    IndexRebuildRequest, ConfigUpdate, DocumentStatus
+    IndexRebuildRequest, ConfigUpdate, DocumentStatus,
+    IngestRequest, IngestResponse,
 )
 from ..dependencies import get_rag_engine, get_task_manager
 
 
 router = APIRouter()
+
+
+@router.post("/documents/ingest", response_model=IngestResponse, summary="接收外部文档数据")
+async def ingest_documents(request: IngestRequest):
+    """接收外部服务提交的已处理文档并更新索引"""
+    try:
+        rag_engine = get_rag_engine()
+        payload = [doc.dict() for doc in request.documents]
+        result = await rag_engine.ingest_documents_async(
+            payload,
+            reset_existing=request.reset_index,
+        )
+
+        message = "成功摄取文档" if not request.reset_index else "索引重建完成"
+        return IngestResponse(
+            success=True,
+            indexed_documents=result.get("indexed_documents", 0),
+            indexed_nodes=result.get("indexed_nodes", 0),
+            keyword_chunks=result.get("keyword_chunks", 0),
+            message=message,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"文档摄取失败: {exc}")
+
+
+@router.post("/documents/ingest/upload", response_model=IngestResponse, summary="上传文件并索引")
+async def ingest_documents_from_files(
+    files: List[UploadFile] = File(...),
+    reset_index: bool = Form(False),
+    metadata: Optional[str] = Form(None, description="可选，JSON格式的文件元数据映射"),
+):
+    """直接上传PDF/DOCX/TXT文件并写入索引"""
+    if not files:
+        raise HTTPException(status_code=400, detail="请提供至少一个文件")
+
+    allowed_ext = {'.pdf', '.docx', '.txt'}
+
+    metadata_map: Dict[str, Dict[str, Any]] = {}
+    if metadata:
+        try:
+            raw = json.loads(metadata)
+            if not isinstance(raw, dict):
+                raise ValueError
+            metadata_map = {
+                str(key): value
+                for key, value in raw.items()
+                if isinstance(value, dict)
+            }
+        except ValueError:
+            raise HTTPException(status_code=400, detail="metadata 必须是 JSON 对象，值为字典")
+
+    rag_engine = get_rag_engine()
+
+    uploads: List[Dict[str, Any]] = []
+    for upload in files:
+        filename = upload.filename or f"upload_{uuid.uuid4().hex[:8]}"
+        ext = Path(filename).suffix.lower()
+        if ext not in allowed_ext:
+            raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}")
+
+        data = await upload.read()
+        if not data:
+            raise HTTPException(status_code=400, detail=f"文件 {filename} 内容为空")
+
+        uploads.append({"filename": filename, "data": data})
+
+    try:
+        documents = await rag_engine.documents_from_uploads(uploads)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"文件解析失败: {exc}")
+
+    if not documents:
+        raise HTTPException(status_code=400, detail="未能从文件中提取有效文本")
+
+    ingest_payload = []
+    for doc in documents:
+        doc_metadata = dict(doc.metadata or {})
+        filename = doc_metadata.get("filename")
+        extra_meta = metadata_map.get(filename, {}) if filename else {}
+        combined_metadata = {**doc_metadata, **extra_meta}
+
+        document_id = combined_metadata.pop("document_id", None) or f"doc_{uuid.uuid4().hex[:8]}"
+
+        ingest_payload.append({
+            "document_id": document_id,
+            "filename": filename,
+            "content": doc.text,
+            "metadata": combined_metadata,
+        })
+
+    try:
+        result = await rag_engine.ingest_documents_async(
+            ingest_payload,
+            reset_existing=reset_index,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"文档摄取失败: {exc}")
+
+    message = "成功摄取文件"
+    if reset_index:
+        message = "索引重建完成"
+
+    return IngestResponse(
+        success=True,
+        indexed_documents=result.get("indexed_documents", 0),
+        indexed_nodes=result.get("indexed_nodes", 0),
+        keyword_chunks=result.get("keyword_chunks", 0),
+        message=message,
+    )
 
 
 @router.post("/documents/upload", response_model=UploadResponse, summary="上传文档")
