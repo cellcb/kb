@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..models.chat import ChatRequest, ChatResponse, SourceInfo
-from ..dependencies import get_rag_engine, get_tenant_id
+from ..dependencies import get_conversation_service, get_tenant_id
 
 
 router = APIRouter()
@@ -49,19 +49,12 @@ def _iter_answer_chunks(answer: str, chunk_size: int = 60) -> Iterable[str]:
 async def chat_rag(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于向量检索的对话查询（非流式）"""
     try:
-        rag_engine = get_rag_engine()
+        conversation_service = get_conversation_service()
         start_time = time.time()
 
-        top_k = None
-        response_mode = "compact"
-        if request.search_params:
-            top_k = request.search_params.get("top_k") or request.search_params.get("similarity_top_k")
-            response_mode = request.search_params.get("response_mode", response_mode)
-
-        result = await rag_engine.rag_search_async(
+        result = await conversation_service.rag_query(
             request.message,
-            similarity_top_k=top_k,
-            response_mode=response_mode,
+            search_params=request.search_params,
             tenant_id=tenant_id,
         )
 
@@ -83,22 +76,15 @@ async def chat_rag(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)
 @router.post("/chat/stream", summary="RAG 对话查询（SSE）")
 async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于向量检索的流式对话查询，使用 SSE 输出"""
-    rag_engine = get_rag_engine()
+    conversation_service = get_conversation_service()
     session_id = request.session_id or f"session_{uuid.uuid4().hex[:8]}"
     start_time = time.time()
 
-    similarity_top_k = None
-    response_mode = "compact"
-    if request.search_params:
-        similarity_top_k = request.search_params.get("top_k") or request.search_params.get("similarity_top_k")
-        response_mode = request.search_params.get("response_mode", response_mode)
-
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
-            result = await rag_engine.rag_search_async(
+            result = await conversation_service.rag_query(
                 request.message,
-                similarity_top_k=similarity_top_k,
-                response_mode=response_mode,
+                search_params=request.search_params,
                 tenant_id=tenant_id,
             )
 
@@ -136,19 +122,12 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
 async def chat_es(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于 Elasticsearch 倒排索引的关键字检索"""
     try:
-        rag_engine = get_rag_engine()
+        conversation_service = get_conversation_service()
         start_time = time.time()
 
-        top_k = 5
-        min_score = None
-        if request.search_params:
-            top_k = request.search_params.get("top_k") or request.search_params.get("keyword_top_k") or top_k
-            min_score = request.search_params.get("min_score")
-
-        result = await rag_engine.keyword_search_async(
+        result = await conversation_service.keyword_query(
             request.message,
-            top_k=top_k,
-            min_score=min_score,
+            search_params=request.search_params,
             tenant_id=tenant_id,
         )
 

@@ -1,21 +1,20 @@
 """
-FastAPI Main Application
-RAG Demo Web API Service
+FastAPI entrypoint wiring services and routers.
 """
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from ..core.rag_engine import AsyncRAGEngine
-from ..core.task_manager import TaskManager
+from knowledge import KnowledgeService
+from services.conversation_service import ConversationService
+from services.task_manager import TaskManager
+
 from . import dependencies
-from .routes import chat, documents, tasks, health
+from .routes import chat, documents, health, tasks
 from .models.chat import ErrorResponse
 
 
@@ -25,8 +24,8 @@ async def lifespan(app: FastAPI):
     # 启动时初始化
     logging.info("启动RAG API服务...")
     
-    # 初始化RAG引擎
-    rag_engine = AsyncRAGEngine(
+    # 初始化知识服务
+    knowledge_service = KnowledgeService(
         data_dir="data",
         persist_dir="storage",
         embedding_model="BAAI/bge-small-zh-v1.5",
@@ -35,21 +34,24 @@ async def lifespan(app: FastAPI):
     )
     logging.info(
         "Elasticsearch vector store -> %s (index template: %s)",
-        rag_engine.es_url,
-        rag_engine.es_index_template,
+        knowledge_service.es_url,
+        knowledge_service.es_index_template,
     )
+
+    conversation_service = ConversationService(knowledge_service=knowledge_service)
     
     # 初始化任务管理器
-    task_manager = TaskManager(max_concurrent_tasks=3, rag_engine=rag_engine)
+    task_manager = TaskManager(max_concurrent_tasks=3, knowledge_service=knowledge_service)
     await task_manager.start_workers()
     
     # 设置全局依赖
-    dependencies.set_rag_engine(rag_engine)
+    dependencies.set_knowledge_service(knowledge_service)
+    dependencies.set_conversation_service(conversation_service)
     dependencies.set_task_manager(task_manager)
     
     # 尝试加载现有索引
     try:
-        await rag_engine.get_or_create_index_async()
+        await knowledge_service.get_or_create_index_async()
         logging.info("默认租户索引加载成功")
     except Exception as e:
         logging.warning(f"RAG索引加载失败: {e}")
@@ -136,12 +138,17 @@ logging.basicConfig(
 )
 
 
-if __name__ == "__main__":
+def main():
     import uvicorn
     uvicorn.run(
-        "src.kb.api.main:app",
+        "api.main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,
-        log_level="info"
+        log_level="info",
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    main()

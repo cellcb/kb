@@ -44,4 +44,4 @@ ENV ELASTICSEARCH_URL="http://elasticsearch:9200"
 ENV ELASTICSEARCH_INDEX="kb-documents"
 
 # 启动命令 (使用 uv run)
-CMD ["uv", "run", "uvicorn", "kb.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

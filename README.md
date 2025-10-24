@@ -41,20 +41,7 @@ python start_web.py
 
 访问 http://localhost:8000/docs 查看 API 文档
 
-### 方式2: 命令行界面
-
-```bash
-# 安装依赖 (如果还没有)
-uv sync
-
-# 运行交互式问答
-uv run python src/kb/main.py
-
-# 或者直接查询
-uv run python src/kb/main.py --query "什么是机器学习？"
-```
-
-### 方式3: 一键安装脚本
+### 方式2: 一键安装脚本
 
 ```bash
 # 运行自动安装脚本
@@ -62,7 +49,7 @@ chmod +x scripts/install.sh
 ./scripts/install.sh
 ```
 
-### 方式4: 使用 Makefile
+### 方式3: 使用 Makefile
 
 ```bash
 # 查看所有可用命令
@@ -133,96 +120,42 @@ curl http://localhost:8000/api/status
 
 详细 API 文档：[WEB_API_README.md](WEB_API_README.md)
 
-### 命令行方式
-
-#### 交互式模式
-```bash
-uv run python src/kb/main.py
-```
-
-然后输入问题，例如：
-- "什么是深度学习？"
-- "机器学习有哪些类型？"
-- "解释一下神经网络"
-
-#### 直接查询
-```bash
-uv run python src/kb/main.py --query "什么是自然语言处理？"
-```
-
-### 重建索引
-
-如果添加了新文档或想重建索引：
-
-```bash
-python -m src.kb.main --rebuild
-```
-
-### Embedding模型选择
-
-查看可用的embedding模型：
-
-```bash
-python -m src.kb.main --list-models
-```
-
-使用不同的embedding模型：
-
-```bash
-# 中文优化模型（默认）
-python -m src.kb.main --embedding-model BAAI/bge-small-zh-v1.5
-
-# 英文轻量模型
-python -m src.kb.main --embedding-model sentence-transformers/all-MiniLM-L6-v2
-
-# 多语言模型
-python -m src.kb.main --embedding-model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-```
-
 ### 模型离线缓存
 
 - 运行过程中会自动将 HuggingFace 模型缓存到 `storage/models/`（可通过 `EMBEDDING_CACHE_DIR` 自定义目录）。
 - 将模型手动下载至该目录后，可设置 `EMBEDDING_LOCAL_FILES_ONLY=1` 或在命令中传入 `--embedding-local-files-only`，即可脱离外网使用。
-- CLI 及 Web API 都会复用缓存目录，避免重复下载。
+- API 服务会复用缓存目录，避免重复下载。
 
 ## 📁 项目结构
 
 ```
 rag-demo/
 ├── src/
-│   └── kb/
-│       ├── __init__.py
-│       ├── main.py              # 命令行界面入口
-│       ├── api/                 # Web API 服务
-│       │   ├── main.py         # FastAPI 应用入口
-│       │   ├── routes/         # API 路由
-│       │   └── models/         # Pydantic 模型
-│       └── core/               # 核心业务逻辑
-│           ├── rag_engine.py   # 异步 RAG 引擎
-│           └── task_manager.py # 任务管理器
+│   ├── api/                    # FastAPI 应用与路由
+│   ├── knowledge/              # 知识服务 (索引、检索、解析)
+│   ├── services/               # 对话服务、任务服务等业务编排
+│   ├── agents/                 # Agno 智能体运行时（规划中）
+│   └── shared/                 # 公共配置与工具
 ├── scripts/                    # 工具脚本
-│   ├── install.sh             # 一键安装脚本
-│   └── dev.sh                 # 开发环境设置
+│   ├── install.sh              # 一键安装脚本
+│   └── dev.sh                  # 开发环境设置
 ├── data/                       # 文档数据目录（自动创建）
 ├── storage/                    # 本地缓存目录（文件缓存、任务状态）
-├── start_web.py               # Web 服务启动脚本
-├── test_api.py                # API 测试脚本
-├── Makefile                   # 常用命令快捷方式
-├── Dockerfile                 # Docker 配置
-├── docker-compose.yml         # Docker Compose 配置
-├── pyproject.toml             # 项目配置 (uv)
-├── WEB_API_README.md          # Web API 详细文档
-└── README.md                  # 项目说明
+├── start_web.py                # Web 服务启动脚本
+├── test_api.py                 # API 测试脚本
+├── Makefile                    # 常用命令快捷方式
+├── Dockerfile                  # Docker 配置
+├── docker-compose.yml          # Docker Compose 配置
+├── pyproject.toml              # 项目配置 (uv)
+├── WEB_API_README.md           # Web API 详细文档
+└── README.md                   # 项目说明
 ```
 
 ## 自定义文档
 
-1. 将你的文档文件放入 `data/` 目录
-   - 支持格式：`.txt`、`.pdf`
-   - PDF文件会自动进行文本提取
-   - 系统会智能检测文件类型
-2. 运行程序时使用 `--rebuild` 参数重建索引
-3. 开始查询你的自定义文档
+1. 调用 `/api/documents/upload` 上传文件（支持 `.txt`、`.pdf`、`.docx`）
+2. 通过 `/api/tasks/{task_id}` 查看摄取进度
+3. 使用 `/api/chat` 或 `/api/chat/stream` 进行问答
 
 ### PDF文档支持
 
@@ -231,28 +164,6 @@ rag-demo/
 - ✅ **多页文档**: 支持多页PDF，保留页面信息
 - ✅ **错误处理**: 自动跳过损坏或扫描版PDF
 - ✅ **缓存机制**: 避免重复处理相同文件
-
-## 命令行选项
-
-```bash
-python -m src.kb.main [选项]
-
-选项:
-  --data-dir DIR           指定文档数据目录 (默认: data)
-  --persist-dir DIR        指定本地缓存目录 (默认: storage)
-  --query QUESTION         直接查询问题而不进入交互模式
-  --rebuild                强制重建索引（会重置 Elasticsearch 索引）
-  --embedding-model MODEL  指定embedding模型 (默认: BAAI/bge-small-zh-v1.5)
-  --list-models            列出推荐的embedding模型
-  --test-embedding         测试embedding模型功能
-  --disable-parallel       禁用并行处理，使用串行模式
-  --max-workers N          设置并行处理的最大工作线程数 (默认: 2)
-  --es-url URL             Elasticsearch 服务地址（默认读取 ELASTICSEARCH_URL）
-  --es-index NAME          Elasticsearch 索引名称 (默认: kb-documents)
-  --es-user USER           Elasticsearch 基本认证用户名
-  --es-password PASS       Elasticsearch 基本认证密码
-  -h, --help               显示帮助信息
-```
 
 ## 🛠️ 开发
 
@@ -308,8 +219,6 @@ uv run python test_api.py
 - **elasticsearch**: 官方 Elasticsearch Python 客户端
 - **sentence-transformers**: 本地embedding模型库
 - **torch**: PyTorch深度学习框架
-- **python-dotenv**: 环境变量管理
-- **rich**: 美观的命令行界面
 - **pypdf**: PDF文档快速文本提取
 - **pdfplumber**: 复杂PDF布局处理
 - **python-magic**: 智能文件类型检测（可选）
@@ -334,60 +243,35 @@ uv run python test_api.py
 
 ## PDF支持使用示例
 
-### 基本使用
+### 上传与查询
 
 ```bash
-# 将PDF文件放入data目录
-cp /path/to/your/document.pdf data/
+# 1. 上传 PDF 文件
+curl -X POST "http://localhost:8000/api/documents/upload" \
+  -H "X-Tenant-ID: demo" \
+  -F "files=@/path/to/document.pdf"
 
-# 重建索引以包含PDF文档
-uv run python src/kb/main.py --rebuild
+# 2. 轮询任务状态
+curl "http://localhost:8000/api/tasks/<task_id>"
 
-# 查询PDF内容
-uv run python src/kb/main.py --query "文档中提到了什么？"
+# 3. 发起问答
+curl -X POST "http://localhost:8000/api/chat" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: demo" \
+  -d '{"message": "文档中提到了什么？"}'
 ```
 
-### 性能优化选项
+### 性能调整
 
-```bash
-# 使用更多线程并行处理多个PDF文件
-uv run python src/kb/main.py --rebuild --max-workers 4
+- 上传时设置 `parallel_workers` 控制并行解析线程数（默认 4）。
+- 通过 `enable_batch_processing`、`priority` 等参数优化长任务调度。
+- Elasticsearch 索引会自动复用缓存，避免重复处理相同文件。
 
-# 禁用并行处理（适用于内存受限环境）
-uv run python src/kb/main.py --rebuild --disable-parallel
-```
+### 批量处理建议
 
-### 处理大量文档
-
-当处理大量PDF文档时，系统会：
-- 📊 显示详细的处理进度
-- ⚡ 自动并行处理多个文件
-- 💾 缓存已处理的文件避免重复工作
-- 📈 提供性能统计信息
-
-**示例输出：**
-```
-发现 20 个文件，开始处理...
-使用并行处理 (最大 4 个工作线程)
-✓ pypdf成功提取 2,543 字符
-✓ 使用缓存内容: document2.pdf (1,234 字符)
-  完成 document3.pdf 100% 20/20 0:00:15
-
-文档处理统计
-┏━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ 项目       ┃   数量 ┃ 说明                   ┃
-┡━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ 成功处理   │     18 │ ✓ 已加载到向量数据库   │
-│ PDF文件    │     15 │ 通过pypdf/pdfplumber │
-│ 文本文件   │      3 │ 直接读取              │
-│ 跳过文件   │      1 │ 空文件或不支持格式     │
-│ 失败文件   │      1 │ ❌ 处理过程中出错     │
-│ 总字符数   │ 45,821 │ 提取的文本总长度       │
-│ 处理时间   │ 15.2秒 │ 并行处理              │
-└────────────┴────────┴────────────────────────┘
-📊 处理速度: 1.2 文件/秒, 3,014 字符/秒
-💾 缓存中有 10 个文件，下次处理将更快
-```
+- 分批上传大型文档集，配合任务查询接口追踪进度。
+- 将常用文档保存在 `storage/cache`，系统会自动跳过已处理文件。
+- 结合 `/api/chat/stream` 获取实时回答片段，提升交互体验。
 
 ## 许可证
 

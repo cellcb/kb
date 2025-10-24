@@ -19,8 +19,8 @@ def main():
     try:
         # 使用 uv run 启动服务
         subprocess.run([
-            "uv", "run", "uvicorn", 
-            "src.kb.api.main:app",
+            "uv", "run", "uvicorn",
+            "api.main:app",
             "--host", "0.0.0.0",
             "--port", "8000",
             "--reload",

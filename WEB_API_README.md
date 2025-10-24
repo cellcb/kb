@@ -26,7 +26,7 @@ uv sync
 python start_web.py
 
 # 或直接使用 uv run
-uv run uvicorn src.kb.api.main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 方式2：传统方式 (兼容)
@@ -119,14 +119,14 @@ export STORAGE_DIR="./storage"                    # 存储目录
 ### 运行时配置
 ```bash
 # 使用 uv 启动 (推荐)
-uv run uvicorn src.kb.api.main:app \
+uv run uvicorn api.main:app \
   --host 0.0.0.0 \
   --port 8000 \
   --workers 1 \
   --loop uvloop
 
 # 传统方式
-uvicorn src.kb.api.main:app \
+uvicorn api.main:app \
   --host 0.0.0.0 \
   --port 8000 \
   --workers 1 \

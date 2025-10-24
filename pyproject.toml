@@ -28,7 +28,7 @@ dependencies = [
     
     # Web API Framework
     "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
+    "uvicorn>=0.24.0",
     "python-multipart>=0.0.6",
     "aiofiles>=23.0.0",
     "python-docx>=0.8.11",
@@ -40,20 +40,15 @@ dependencies = [
     
     # Utilities
     "requests>=2.25.0",
-    "python-dotenv>=1.0.0",
     "psutil>=5.9.0",
     
     # Vector storage
     "elasticsearch>=8.12.0",
     "llama-index-vector-stores-elasticsearch>=0.2.0",
-    
-    # CLI Interface (kept for backward compatibility)
-    "rich>=13.0.0",
 ]
 
 [project.scripts]
-rag-demo = "kb.main:main"
-rag-web = "kb.api.main:main"
+rag-web = "api.main:main"
 
 [tool.uv]
 dev-dependencies = [
@@ -66,7 +61,7 @@ dev-dependencies = [
 [project.optional-dependencies]
 web = [
     "fastapi>=0.104.0",
-    "uvicorn[standard]>=0.24.0",
+    "uvicorn>=0.24.0",
     "python-multipart>=0.0.6",
     "aiofiles>=23.0.0",
     "psutil>=5.9.0",
@@ -81,11 +76,21 @@ profile = "black"
 line_length = 100 
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kb"]
+packages = [
+    "src/api",
+    "src/agents",
+    "src/knowledge",
+    "src/services",
+    "src/shared",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/kb",
+    "src/api",
+    "src/agents",
+    "src/knowledge",
+    "src/services",
+    "src/shared",
     "README.md",
     "LICENSE*",
     "pyproject.toml",

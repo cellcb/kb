@@ -24,7 +24,7 @@ start:  ## 启动Web服务
 
 start-uv:  ## 使用uv启动Web服务
 	@echo "🚀 使用uv启动Web服务..."
-	UVICORN_LOOP=asyncio uv run uvicorn src.kb.api.main:app --host 0.0.0.0 --port 8000 --reload
+	UVICORN_LOOP=asyncio uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
 test:  ## 运行API测试
 	@echo "🧪 运行API测试..."

@@ -5,22 +5,30 @@ Dependencies for FastAPI
 
 import re
 from typing import Optional
+
 from fastapi import HTTPException, Header
 
-from ..core.rag_engine import AsyncRAGEngine
-from ..core.task_manager import TaskManager
+from knowledge import KnowledgeService
+from services.conversation_service import ConversationService
+from services.task_manager import TaskManager
 
 
-# 全局变量
-_rag_engine: Optional[AsyncRAGEngine] = None
+_knowledge_service: Optional[KnowledgeService] = None
+_conversation_service: Optional[ConversationService] = None
 _task_manager: Optional[TaskManager] = None
 _TENANT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def set_rag_engine(engine: AsyncRAGEngine):
-    """设置RAG引擎实例"""
-    global _rag_engine
-    _rag_engine = engine
+def set_knowledge_service(service: KnowledgeService):
+    """注册全局知识服务实例"""
+    global _knowledge_service
+    _knowledge_service = service
+
+
+def set_conversation_service(service: ConversationService):
+    """注册对话服务实例"""
+    global _conversation_service
+    _conversation_service = service
 
 
 def set_task_manager(manager: TaskManager):
@@ -29,11 +37,18 @@ def set_task_manager(manager: TaskManager):
     _task_manager = manager
 
 
-def get_rag_engine() -> AsyncRAGEngine:
-    """获取RAG引擎实例"""
-    if _rag_engine is None:
-        raise HTTPException(status_code=503, detail="RAG引擎未初始化")
-    return _rag_engine
+def get_knowledge_service() -> KnowledgeService:
+    """获取知识服务实例"""
+    if _knowledge_service is None:
+        raise HTTPException(status_code=503, detail="知识服务未初始化")
+    return _knowledge_service
+
+
+def get_conversation_service() -> ConversationService:
+    """获取对话服务实例"""
+    if _conversation_service is None:
+        raise HTTPException(status_code=503, detail="对话服务未初始化")
+    return _conversation_service
 
 
 def get_task_manager() -> TaskManager:
@@ -41,6 +56,12 @@ def get_task_manager() -> TaskManager:
     if _task_manager is None:
         raise HTTPException(status_code=503, detail="任务管理器未初始化")
     return _task_manager
+
+
+# 暂时保留兼容接口，供旧代码过渡使用
+def get_rag_engine() -> KnowledgeService:
+    """兼容旧接口"""
+    return get_knowledge_service()
 
 
 def get_tenant_id(x_tenant_id: str = Header(default=None, alias="X-Tenant-ID")) -> str:

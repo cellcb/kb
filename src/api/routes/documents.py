@@ -11,8 +11,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks, APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
-from ...core.task_manager import QueuedDocument
-from ..dependencies import get_rag_engine, get_task_manager, get_tenant_id
+from services.task_manager import QueuedDocument
+from ..dependencies import get_knowledge_service, get_task_manager, get_tenant_id
 from ..models.documents import (
     ConfigUpdate,
     DocumentInfo,
@@ -33,9 +33,9 @@ router = APIRouter()
 async def ingest_documents(request: IngestRequest, tenant_id: str = Depends(get_tenant_id)):
     """接收外部服务提交的已处理文档并更新索引"""
     try:
-        rag_engine = get_rag_engine()
+        knowledge_service = get_knowledge_service()
         payload = [doc.dict() for doc in request.documents]
-        result = await rag_engine.ingest_documents_async(
+        result = await knowledge_service.ingest_documents_async(
             payload,
             reset_existing=request.reset_index,
             tenant_id=tenant_id,
@@ -85,7 +85,7 @@ async def ingest_documents_from_files(
         except ValueError:
             raise HTTPException(status_code=400, detail="metadata 必须是 JSON 对象，值为字典")
 
-    rag_engine = get_rag_engine()
+    knowledge_service = get_knowledge_service()
 
     uploads: List[Dict[str, Any]] = []
     for upload in files:
@@ -101,7 +101,7 @@ async def ingest_documents_from_files(
         uploads.append({"filename": filename, "data": data})
 
     try:
-        documents = await rag_engine.documents_from_uploads(uploads)
+        documents = await knowledge_service.documents_from_uploads(uploads)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -127,7 +127,7 @@ async def ingest_documents_from_files(
         })
 
     try:
-        result = await rag_engine.ingest_documents_async(
+        result = await knowledge_service.ingest_documents_async(
             ingest_payload,
             reset_existing=reset_index,
             tenant_id=tenant_id,
@@ -184,6 +184,7 @@ async def upload_documents(
         None,
         description="可选，自定义文档ID。支持 JSON 数组（按文件顺序）或 JSON 对象（filename -> document_id）。",
     ),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """
     上传一个或多个文档进行处理
@@ -264,8 +265,8 @@ async def upload_documents(
             uploaded_files.append(file)
         
         # 保存上传的文件
-        rag_engine = get_rag_engine()
-        data_dir = rag_engine.data_dir
+        knowledge_service = get_knowledge_service()
+        data_dir = knowledge_service.data_dir
         data_dir.mkdir(exist_ok=True)
         
         document_infos = []
@@ -343,7 +344,7 @@ async def upload_documents(
             'priority': priority
         }
         
-        task_id = await task_manager.submit_task(queued_documents, options)
+        task_id = await task_manager.submit_task(queued_documents, options, tenant_id=tenant_id)
         
         # 估算处理时间
         total_size_mb = sum(info.file_size for info in document_infos) / (1024 * 1024)
@@ -378,8 +379,8 @@ async def list_documents():
     获取所有已上传文档的列表
     """
     try:
-        rag_engine = get_rag_engine()
-        data_dir = rag_engine.data_dir
+        knowledge_service = get_knowledge_service()
+        data_dir = knowledge_service.data_dir
         
         if not data_dir.exists():
             return DocumentListResponse(
@@ -417,9 +418,9 @@ async def list_documents():
             total_size += file_size
 
             char_count = None
-            if hasattr(rag_engine, 'file_cache'):
+            if hasattr(knowledge_service, 'file_cache'):
                 cache_key = str(file_path)
-                cached_info = rag_engine.file_cache.get(cache_key, {})
+                cached_info = knowledge_service.file_cache.get(cache_key, {})
                 char_count = cached_info.get('char_count')
             
             doc_info = DocumentInfo(
@@ -456,8 +457,8 @@ async def delete_document(document_id: str):
     - **document_id**: 文档ID
     """
     try:
-        rag_engine = get_rag_engine()
-        data_dir = rag_engine.data_dir
+        knowledge_service = get_knowledge_service()
+        data_dir = knowledge_service.data_dir
         
         # 查找对应的文件
         deleted_files = []
@@ -483,10 +484,10 @@ async def delete_document(document_id: str):
                 except OSError:
                     pass
             
-            if hasattr(rag_engine, 'file_cache'):
+            if hasattr(knowledge_service, 'file_cache'):
                 cache_key = str(file_path)
-                rag_engine.file_cache.pop(cache_key, None)
-                rag_engine._save_file_cache()
+                knowledge_service.file_cache.pop(cache_key, None)
+                knowledge_service._save_file_cache()
         
         if not deleted_files:
             raise HTTPException(
@@ -495,7 +496,7 @@ async def delete_document(document_id: str):
             )
 
         try:
-            await rag_engine.delete_document_async(document_id=document_id)
+            await knowledge_service.delete_document_async(document_id=document_id)
         except ValueError:
             pass
         except Exception as exc:
@@ -527,11 +528,11 @@ async def rebuild_index(request: IndexRebuildRequest, tenant_id: str = Depends(g
     - **force**: 是否强制重建
     """
     try:
-        rag_engine = get_rag_engine()
+        knowledge_service = get_knowledge_service()
         task_manager = get_task_manager()
         
         # 获取所有文档文件
-        data_dir = rag_engine.data_dir
+        data_dir = knowledge_service.data_dir
         all_files = [f for f in data_dir.iterdir() if f.is_file()]
         
         if not all_files:
@@ -541,15 +542,15 @@ async def rebuild_index(request: IndexRebuildRequest, tenant_id: str = Depends(g
             )
         
         # 如果不是强制重建，检查索引是否已存在
-        if not request.force and rag_engine.has_index(tenant_id=tenant_id):
+        if not request.force and knowledge_service.has_index(tenant_id=tenant_id):
             return {
                 "message": "索引已存在，使用 force=true 强制重建",
                 "index_exists": True
             }
         
         # 异步重建索引
-        documents = await rag_engine.process_documents_async(all_files)
-        await rag_engine.build_index_async(documents, reset_existing=True, tenant_id=tenant_id)
+        documents = await knowledge_service.process_documents_async(all_files)
+        await knowledge_service.build_index_async(documents, reset_existing=True, tenant_id=tenant_id)
         
         return {
             "message": "索引重建成功",
@@ -576,17 +577,17 @@ async def update_config(config: ConfigUpdate):
     - **chunk_size**: 文本分块大小
     """
     try:
-        rag_engine = get_rag_engine()
+        knowledge_service = get_knowledge_service()
         updated_config = {}
         
         # 更新最大并行工作线程数
         if config.max_parallel_workers is not None:
-            rag_engine.max_workers = config.max_parallel_workers
+            knowledge_service.max_workers = config.max_parallel_workers
             updated_config['max_parallel_workers'] = config.max_parallel_workers
         
         # 更新embedding模型（需要重新初始化）
         if config.embedding_model is not None:
-            rag_engine._setup_embedding_model(config.embedding_model)
+            knowledge_service._setup_embedding_model(config.embedding_model)
             updated_config['embedding_model'] = config.embedding_model
         
         # 更新文本分块大小（需要重新初始化node_parser）

@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends
 
 from ..models.documents import SystemStatus
-from ..dependencies import get_rag_engine, get_task_manager
+from ..dependencies import get_knowledge_service, get_task_manager
 
 
 router = APIRouter()
@@ -27,12 +27,12 @@ async def health_check():
 async def get_system_status():
     """获取详细系统状态"""
     try:
-        rag_engine = get_rag_engine()
+        knowledge_service = get_knowledge_service()
         task_manager = get_task_manager()
         
         # 获取系统信息
         system_stats = task_manager.get_system_stats()
-        rag_status = rag_engine.get_status()
+        rag_status = knowledge_service.get_status()
         
         # 获取内存使用情况
         memory = psutil.virtual_memory()

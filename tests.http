@@ -1,5 +1,5 @@
 ### RAG 同步查询
-POST http://localhost:8000/api/query
+POST http://localhost:8000/api/chat
 Content-Type: application/json
 X-Tenant-ID: demo-tenant
 
@@ -12,7 +12,7 @@ X-Tenant-ID: demo-tenant
 }
 
 ### RAG 流式查询（SSE）
-POST http://localhost:8000/api/query/stream
+POST http://localhost:8000/api/chat/stream
 Content-Type: application/json
 Accept: text/event-stream
 X-Tenant-ID: demo-tenant

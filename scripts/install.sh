@@ -28,7 +28,7 @@ mkdir -p data storage
 
 # 检查 Python 模块是否可以导入
 echo "🔍 验证安装..."
-if uv run python -c "import kb.api.main" 2>/dev/null; then
+if uv run python -c "import api.main" 2>/dev/null; then
     echo "✅ 项目安装成功！"
 else
     echo "❌ 项目安装验证失败"
@@ -40,7 +40,7 @@ echo "🎉 安装完成！"
 echo ""
 echo "📖 使用方法："
 echo "   启动Web服务: python start_web.py"
-echo "   或者: uv run uvicorn src.kb.api.main:app --host 0.0.0.0 --port 8000 --reload"
+echo "   或者: uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload"
 echo ""
 echo "📚 文档地址: http://localhost:8000/docs"
 echo ""

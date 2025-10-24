@@ -11,10 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ..api.models.documents import DocumentInfo, DocumentStatus, TaskInfo, TaskProgress, TaskStatus
+from api.models.documents import DocumentInfo, DocumentStatus, TaskInfo, TaskProgress, TaskStatus
 
 if TYPE_CHECKING:
-    from .rag_engine import AsyncRAGEngine
+    from knowledge import KnowledgeService
 
 
 @dataclass
@@ -44,14 +44,14 @@ class TaskData:
 class TaskManager:
     """异步任务管理器"""
     
-    def __init__(self, max_concurrent_tasks: int = 3, rag_engine: Optional["AsyncRAGEngine"] = None):
+    def __init__(self, max_concurrent_tasks: int = 3, knowledge_service: Optional["KnowledgeService"] = None):
         self.active_tasks: Dict[str, TaskData] = {}
         self.task_queue = asyncio.Queue()
         self.max_concurrent_tasks = max_concurrent_tasks
         self.logger = self._setup_logger()
         self._workers_running = False
         self._worker_tasks: List[asyncio.Task] = []
-        self.rag_engine = rag_engine
+        self.knowledge_service = knowledge_service
         
     def _setup_logger(self) -> logging.Logger:
         """配置日志记录器"""
@@ -161,8 +161,8 @@ class TaskManager:
     
     async def _process_documents(self, task_data: TaskData):
         """真实的文档处理与索引构建逻辑"""
-        if not self.rag_engine:
-            raise RuntimeError("任务管理器未配置 RAG 引擎，无法处理上传的文档")
+        if not self.knowledge_service:
+            raise RuntimeError("任务管理器未配置知识服务，无法处理上传的文档")
 
         documents = task_data.documents
         total_files = len(documents)
@@ -201,7 +201,7 @@ class TaskManager:
                 if not file_bytes:
                     raise ValueError("文件内容为空")
 
-                documents_from_file = await self.rag_engine.documents_from_uploads(
+                documents_from_file = await self.knowledge_service.documents_from_uploads(
                     [{"filename": queued.filename, "data": file_bytes}]
                 )
                 if not documents_from_file:
@@ -225,7 +225,7 @@ class TaskManager:
                     "metadata": metadata,
                 }]
 
-                await self.rag_engine.ingest_documents_async(
+                await self.knowledge_service.ingest_documents_async(
                     payload,
                     reset_existing=False,
                     tenant_id=tenant_id,

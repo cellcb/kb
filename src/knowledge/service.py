@@ -1,5 +1,5 @@
 """
-Async RAG Engine - Core business logic without CLI dependencies
+Knowledge service encapsulating RAG ingestion and retrieval logic.
 """
 
 import os
@@ -48,7 +48,7 @@ except ImportError:  # pragma: no cover - fallback for older LlamaIndex versions
 
 
 @dataclass
-class _TenantRuntime:
+class TenantRuntime:
     """Runtime objects bound to a tenant-specific Elasticsearch namespace."""
 
     tenant_id: Optional[str]
@@ -63,8 +63,8 @@ class _TenantRuntime:
     keyword_index_checked: bool = False
 
 
-class AsyncRAGEngine:
-    """异步RAG引擎 - 去除CLI依赖，支持Web API调用"""
+class KnowledgeService:
+    """异步 RAG 知识服务，提供检索与索引能力供 API / Agent 使用。"""
     
     def __init__(
         self,
@@ -154,7 +154,7 @@ class AsyncRAGEngine:
         analyzer_env = os.getenv("ELASTICSEARCH_TEXT_ANALYZER")
         self.es_text_analyzer = analyzer_env or es_text_analyzer or "standard"
         self._default_tenant_key = "__default__"
-        self._tenant_states: Dict[str, _TenantRuntime] = {}
+        self._tenant_states: Dict[str, TenantRuntime] = {}
 
         # 线程池用于并行处理
         self._thread_pool = ThreadPoolExecutor(max_workers=max_workers)
@@ -194,10 +194,10 @@ class AsyncRAGEngine:
             raise ValueError(f"非法的租户标识: {tenant_id!r}")
         return candidate
 
-    def _create_tenant_runtime(self, tenant_id: Optional[str]) -> _TenantRuntime:
+    def _create_tenant_runtime(self, tenant_id: Optional[str]) -> TenantRuntime:
         """Instantiate a runtime container for the given tenant."""
         if tenant_id is None:
-            return _TenantRuntime(
+            return TenantRuntime(
                 tenant_id=None,
                 normalized_id=None,
                 vector_index=self.es_index_template,
@@ -218,7 +218,7 @@ class AsyncRAGEngine:
             vector_index,
             keyword_index,
         )
-        return _TenantRuntime(
+        return TenantRuntime(
             tenant_id=tenant_id,
             normalized_id=normalized,
             vector_index=vector_index,
@@ -227,7 +227,7 @@ class AsyncRAGEngine:
             keyword_alias=keyword_alias,
         )
 
-    def _get_tenant_runtime(self, tenant_id: Optional[str]) -> _TenantRuntime:
+    def _get_tenant_runtime(self, tenant_id: Optional[str]) -> TenantRuntime:
         """Fetch or initialize runtime state for a tenant."""
         key = self._tenant_key(tenant_id)
         runtime = self._tenant_states.get(key)
@@ -237,12 +237,12 @@ class AsyncRAGEngine:
         return runtime
 
     @staticmethod
-    def _vector_target(runtime: _TenantRuntime) -> str:
+    def _vector_target(runtime: TenantRuntime) -> str:
         """Return the preferred index/alias for vector operations."""
         return runtime.vector_alias or runtime.vector_index
 
     @staticmethod
-    def _keyword_target(runtime: _TenantRuntime) -> str:
+    def _keyword_target(runtime: TenantRuntime) -> str:
         """Return the preferred index/alias for keyword operations."""
         return runtime.keyword_alias or runtime.keyword_index
 
@@ -298,7 +298,7 @@ class AsyncRAGEngine:
 
     def _vector_index_from_nodes(
         self,
-        runtime: _TenantRuntime,
+        runtime: TenantRuntime,
         nodes: List[Document],
     ) -> VectorStoreIndex:
         """Create a vector index from nodes with backwards compatibility."""
@@ -312,7 +312,7 @@ class AsyncRAGEngine:
             storage_context=runtime.storage_context,
         )
 
-    def _vector_index_from_store(self, runtime: _TenantRuntime) -> VectorStoreIndex:
+    def _vector_index_from_store(self, runtime: TenantRuntime) -> VectorStoreIndex:
         """Load a vector index from an existing store, handling API changes."""
         if hasattr(VectorStoreIndex, "from_vector_store"):
             return VectorStoreIndex.from_vector_store(
@@ -410,7 +410,7 @@ class AsyncRAGEngine:
 
     def _setup_logger(self) -> logging.Logger:
         """配置日志记录器"""
-        logger = logging.getLogger(f"{__name__}.AsyncRAGEngine")
+        logger = logging.getLogger(f"{__name__}.KnowledgeService")
         logger.setLevel(logging.INFO)
         
         if not logger.handlers:
@@ -460,7 +460,7 @@ class AsyncRAGEngine:
                 cache_folder=cache_folder,
             )
     
-    def _init_vector_store(self, tenant_id: Optional[str] = None, force: bool = False) -> _TenantRuntime:
+    def _init_vector_store(self, tenant_id: Optional[str] = None, force: bool = False) -> TenantRuntime:
         """初始化或重建 Elasticsearch 向量存储"""
         runtime = self._get_tenant_runtime(tenant_id)
 
@@ -488,7 +488,7 @@ class AsyncRAGEngine:
             raise
         return runtime
     
-    def _ensure_vector_store(self, tenant_id: Optional[str] = None) -> _TenantRuntime:
+    def _ensure_vector_store(self, tenant_id: Optional[str] = None) -> TenantRuntime:
         """确保向量存储已初始化"""
         runtime = self._get_tenant_runtime(tenant_id)
         if runtime.vector_store is None or runtime.storage_context is None:

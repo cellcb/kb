@@ -1,11 +1,15 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/kb/api`: FastAPI app wiring, route handlers, and request models; `main.py` boots the service and composes routers.
-- `src/kb/core`: Retrieval pipeline primitives such as `AsyncRAGEngine` and `TaskManager`.
-- `scripts/`: Helper utilities and maintenance entry points.
-- `data/` and `storage/`: Default ingest corpus and local caches (vector data now lives in Elasticsearch); keep large or sensitive inputs out of Git.
-- `test_api.py`: Async smoke tests that probe the HTTP surface once the server is running.
+- `src/api`: FastAPI wiring, routers, and DTO models; `main.py` composes dependencies and application lifespan.
+- `src/knowledge`: Retrieval + ingestion primitives exposed via `KnowledgeService`.
+- `src/services`: Orchestration layer (`ConversationService`, `TaskManager`, etc.) that bridges API requests to knowledge/agents.
+- `src/agents`: Agno-based agent runtime and tooling (initial scaffolding in place; expand here for multi-agent flows).
+- `src/shared`: Common utilities/config shared across modules.
+- `scripts/`: Operational helpers (install, dev bootstrap, start_web wrapper).
+- `data/` & `storage/`: Default ingest corpus and on-disk caches; avoid committing large or sensitive artifacts.
+- `tests.http` & `test_api.py`: HTTP smoke scenarios and async API probes once the service is running.
+- ⚠️ CLI entrypoints were removed—interact with the system exclusively through the Web API or agent services.
 
 ## Build, Test, and Development Commands
 - `make install` / `make install-dev`: Synchronize dependencies via `uv`; run the dev target when you need test and lint extras.
