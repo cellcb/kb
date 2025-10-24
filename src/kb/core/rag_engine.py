@@ -71,6 +71,8 @@ class AsyncRAGEngine:
         data_dir: str = "data",
         persist_dir: str = "storage",
         embedding_model: str = "BAAI/bge-small-zh-v1.5",
+        embedding_cache_dir: Optional[str] = None,
+        embedding_local_files_only: Optional[bool] = None,
         enable_parallel: bool = True,
         max_workers: int = 2,
         es_url: Optional[str] = None,
@@ -90,6 +92,32 @@ class AsyncRAGEngine:
         self.max_workers = max_workers
         self.cache_dir = self.persist_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        cache_env = os.getenv("EMBEDDING_CACHE_DIR")
+        default_cache = self.persist_dir / "models"
+        self.embedding_cache_dir = Path(embedding_cache_dir or cache_env or default_cache)
+        self.embedding_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        def _coerce_bool(value: Optional[object]) -> Optional[bool]:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+        env_local_flag = _coerce_bool(os.getenv("EMBEDDING_LOCAL_FILES_ONLY"))
+        if embedding_local_files_only is None:
+            self.embedding_local_files_only = env_local_flag if env_local_flag is not None else False
+        else:
+            self.embedding_local_files_only = bool(embedding_local_files_only)
+
+        if self.embedding_local_files_only:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+            os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+            self.logger.info("已启用 HuggingFace 离线模式 (仅使用本地缓存)")
+
+        self.logger.info("Embedding 缓存目录: %s", self.embedding_cache_dir)
         
         # 文件处理缓存
         self.file_cache_path = self.cache_dir / "file_cache.json"
@@ -411,14 +439,25 @@ class AsyncRAGEngine:
         if model_name in model_info:
             self.logger.info(f"使用模型: {model_info[model_name]}")
         
+        cache_folder = str(self.embedding_cache_dir)
+
+        resolved_model = Path(model_name)
+        if resolved_model.exists():
+            model_name = str(resolved_model.resolve())
+            self.logger.info("检测到本地embedding模型目录: %s", model_name)
+
         try:
-            Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
+            Settings.embed_model = HuggingFaceEmbedding(
+                model_name=model_name,
+                cache_folder=cache_folder,
+            )
             self.logger.info("Embedding模型加载成功")
         except Exception as e:
             self.logger.error(f"加载embedding模型失败: {e}")
             self.logger.info("尝试使用默认的轻量级模型...")
             Settings.embed_model = HuggingFaceEmbedding(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                cache_folder=cache_folder,
             )
     
     def _init_vector_store(self, tenant_id: Optional[str] = None, force: bool = False) -> _TenantRuntime:

@@ -56,6 +56,8 @@ class RAGDemo:
         data_dir: str = "data",
         persist_dir: str = "storage",
         embedding_model: str = "BAAI/bge-small-zh-v1.5",
+        embedding_cache_dir: Optional[str] = None,
+        embedding_local_files_only: Optional[bool] = None,
         enable_parallel: bool = True,
         max_workers: int = 2,
         es_url: Optional[str] = None,
@@ -74,6 +76,32 @@ class RAGDemo:
         self.max_workers = max_workers
         self.cache_dir = self.persist_dir / "cache"
         self.cache_dir.mkdir(exist_ok=True)
+
+        cache_env = os.getenv("EMBEDDING_CACHE_DIR")
+        default_cache = self.persist_dir / "models"
+        self.embedding_cache_dir = Path(embedding_cache_dir or cache_env or default_cache)
+        self.embedding_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        def _coerce_bool(value: Optional[object]) -> Optional[bool]:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+        env_local_flag = _coerce_bool(os.getenv("EMBEDDING_LOCAL_FILES_ONLY"))
+        if embedding_local_files_only is None:
+            self.embedding_local_files_only = env_local_flag if env_local_flag is not None else False
+        else:
+            self.embedding_local_files_only = bool(embedding_local_files_only)
+
+        if self.embedding_local_files_only:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+            os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+            self.console.print("[yellow]已启用 HuggingFace 离线模式 (仅使用本地缓存)[/yellow]")
+
+        self.console.print(f"[blue]Embedding 缓存目录: {self.embedding_cache_dir}[/blue]")
         
         # 文件处理缓存
         self.file_cache_path = self.cache_dir / "file_cache.json"
@@ -125,14 +153,25 @@ class RAGDemo:
         if model_name in model_info:
             self.console.print(f"[green]使用模型: {model_info[model_name]}[/green]")
         
+        cache_folder = str(self.embedding_cache_dir)
+
+        resolved_model = Path(model_name)
+        if resolved_model.exists():
+            model_name = str(resolved_model.resolve())
+            self.console.print(f"[blue]检测到本地embedding模型目录: {model_name}[/blue]")
+
         try:
-            Settings.embed_model = HuggingFaceEmbedding(model_name=model_name)
+            Settings.embed_model = HuggingFaceEmbedding(
+                model_name=model_name,
+                cache_folder=cache_folder,
+            )
             self.console.print(f"[green]Embedding模型加载成功[/green]")
         except Exception as e:
             self.console.print(f"[red]加载embedding模型失败: {e}[/red]")
             self.console.print("[yellow]尝试使用默认的轻量级模型...[/yellow]")
             Settings.embed_model = HuggingFaceEmbedding(
-                                model_name="sentence-transformers/all-MiniLM-L6-v2"
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                cache_folder=cache_folder,
             )
     
     def _init_vector_store(self, force: bool = False):
@@ -870,6 +909,9 @@ def main():
                         help="列出推荐的embedding模型")
     parser.add_argument("--test-embedding", action="store_true",
                         help="测试embedding模型（无需API密钥）")
+    parser.add_argument("--embedding-cache-dir", help="自定义 embedding 模型缓存目录 (默认: storage/models)")
+    parser.add_argument("--embedding-local-files-only", action="store_true",
+                        help="仅使用本地缓存的 embedding 模型，跳过在线下载")
     parser.add_argument("--disable-parallel", action="store_true",
                         help="禁用并行处理，使用串行模式")
     parser.add_argument("--max-workers", type=int, default=2,
@@ -913,6 +955,8 @@ def main():
         data_dir=args.data_dir, 
         persist_dir=args.persist_dir,
         embedding_model=args.embedding_model,
+        embedding_cache_dir=args.embedding_cache_dir,
+        embedding_local_files_only=args.embedding_local_files_only,
         enable_parallel=not args.disable_parallel,
         max_workers=args.max_workers,
         es_url=args.es_url,

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rag-demo"
+name = "kb"
 version = "0.1.0"
 description = "A RAG demo using LlamaIndex"
 readme = "README.md"

@@ -45,7 +45,7 @@ def _iter_answer_chunks(answer: str, chunk_size: int = 60) -> Iterable[str]:
         yield answer[idx : idx + chunk_size]
 
 
-@router.post("/query", response_model=ChatResponse, summary="RAG 对话查询")
+@router.post("/chat", response_model=ChatResponse, summary="RAG 对话查询")
 async def chat_rag(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于向量检索的对话查询（非流式）"""
     try:
@@ -80,7 +80,7 @@ async def chat_rag(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)
         raise HTTPException(status_code=500, detail=f"RAG 查询处理失败: {exc}")
 
 
-@router.post("/query/stream", summary="RAG 对话查询（SSE）")
+@router.post("/chat/stream", summary="RAG 对话查询（SSE）")
 async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于向量检索的流式对话查询，使用 SSE 输出"""
     rag_engine = get_rag_engine()

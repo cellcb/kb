@@ -179,6 +179,12 @@ python -m src.kb.main --embedding-model sentence-transformers/all-MiniLM-L6-v2
 python -m src.kb.main --embedding-model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ```
 
+### 模型离线缓存
+
+- 运行过程中会自动将 HuggingFace 模型缓存到 `storage/models/`（可通过 `EMBEDDING_CACHE_DIR` 自定义目录）。
+- 将模型手动下载至该目录后，可设置 `EMBEDDING_LOCAL_FILES_ONLY=1` 或在命令中传入 `--embedding-local-files-only`，即可脱离外网使用。
+- CLI 及 Web API 都会复用缓存目录，避免重复下载。
+
 ## 📁 项目结构
 
 ```
