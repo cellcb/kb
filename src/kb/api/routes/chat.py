@@ -6,11 +6,11 @@ import time
 import uuid
 from typing import AsyncGenerator, Dict, Iterable, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..models.chat import ChatRequest, ChatResponse, SourceInfo
-from ..dependencies import get_rag_engine
+from ..dependencies import get_rag_engine, get_tenant_id
 
 
 router = APIRouter()
@@ -46,7 +46,7 @@ def _iter_answer_chunks(answer: str, chunk_size: int = 60) -> Iterable[str]:
 
 
 @router.post("/query", response_model=ChatResponse, summary="RAG 对话查询")
-async def chat_rag(request: ChatRequest):
+async def chat_rag(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于向量检索的对话查询（非流式）"""
     try:
         rag_engine = get_rag_engine()
@@ -62,6 +62,7 @@ async def chat_rag(request: ChatRequest):
             request.message,
             similarity_top_k=top_k,
             response_mode=response_mode,
+            tenant_id=tenant_id,
         )
 
         response_time = f"{time.time() - start_time:.2f}s"
@@ -80,7 +81,7 @@ async def chat_rag(request: ChatRequest):
 
 
 @router.post("/query/stream", summary="RAG 对话查询（SSE）")
-async def chat_rag_stream(request: ChatRequest):
+async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于向量检索的流式对话查询，使用 SSE 输出"""
     rag_engine = get_rag_engine()
     session_id = request.session_id or f"session_{uuid.uuid4().hex[:8]}"
@@ -98,6 +99,7 @@ async def chat_rag_stream(request: ChatRequest):
                 request.message,
                 similarity_top_k=similarity_top_k,
                 response_mode=response_mode,
+                tenant_id=tenant_id,
             )
 
             answer = result.get("answer", "")
@@ -131,7 +133,7 @@ async def chat_rag_stream(request: ChatRequest):
 
 
 @router.post("/search", response_model=ChatResponse, summary="Elasticsearch 关键字查询")
-async def chat_es(request: ChatRequest):
+async def chat_es(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)):
     """基于 Elasticsearch 倒排索引的关键字检索"""
     try:
         rag_engine = get_rag_engine()
@@ -147,6 +149,7 @@ async def chat_es(request: ChatRequest):
             request.message,
             top_k=top_k,
             min_score=min_score,
+            tenant_id=tenant_id,
         )
 
         response_time = f"{time.time() - start_time:.2f}s"

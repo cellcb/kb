@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from ..models.documents import (
@@ -15,14 +15,14 @@ from ..models.documents import (
     IndexRebuildRequest, ConfigUpdate, DocumentStatus,
     IngestRequest, IngestResponse,
 )
-from ..dependencies import get_rag_engine, get_task_manager
+from ..dependencies import get_rag_engine, get_task_manager, get_tenant_id
 
 
 router = APIRouter()
 
 
 @router.post("/documents/ingest", response_model=IngestResponse, summary="接收外部文档数据")
-async def ingest_documents(request: IngestRequest):
+async def ingest_documents(request: IngestRequest, tenant_id: str = Depends(get_tenant_id)):
     """接收外部服务提交的已处理文档并更新索引"""
     try:
         rag_engine = get_rag_engine()
@@ -30,6 +30,7 @@ async def ingest_documents(request: IngestRequest):
         result = await rag_engine.ingest_documents_async(
             payload,
             reset_existing=request.reset_index,
+            tenant_id=tenant_id,
         )
 
         message = "成功摄取文档" if not request.reset_index else "索引重建完成"
@@ -54,6 +55,7 @@ async def ingest_documents_from_files(
     files: List[UploadFile] = File(...),
     reset_index: bool = Form(False),
     metadata: Optional[str] = Form(None, description="可选，JSON格式的文件元数据映射"),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """直接上传PDF/DOCX/TXT文件并写入索引"""
     if not files:
@@ -120,6 +122,7 @@ async def ingest_documents_from_files(
         result = await rag_engine.ingest_documents_async(
             ingest_payload,
             reset_existing=reset_index,
+            tenant_id=tenant_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -360,7 +363,7 @@ async def delete_document(document_id: str):
 
 
 @router.post("/index/rebuild", summary="重建索引")
-async def rebuild_index(request: IndexRebuildRequest):
+async def rebuild_index(request: IndexRebuildRequest, tenant_id: str = Depends(get_tenant_id)):
     """
     重建向量索引
     
@@ -382,7 +385,7 @@ async def rebuild_index(request: IndexRebuildRequest):
             )
         
         # 如果不是强制重建，检查索引是否已存在
-        if not request.force and rag_engine.index is not None:
+        if not request.force and rag_engine.has_index(tenant_id=tenant_id):
             return {
                 "message": "索引已存在，使用 force=true 强制重建",
                 "index_exists": True
@@ -390,7 +393,7 @@ async def rebuild_index(request: IndexRebuildRequest):
         
         # 异步重建索引
         documents = await rag_engine.process_documents_async(all_files)
-        await rag_engine.build_index_async(documents, reset_existing=True)
+        await rag_engine.build_index_async(documents, reset_existing=True, tenant_id=tenant_id)
         
         return {
             "message": "索引重建成功",

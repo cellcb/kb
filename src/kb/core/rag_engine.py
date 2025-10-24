@@ -6,6 +6,7 @@ import os
 import asyncio
 import logging
 from pathlib import Path
+from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Callable
 import hashlib
 import json
@@ -13,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import tempfile
 import time
+import re
 
 import pypdf
 import pdfplumber
@@ -37,11 +39,28 @@ from llama_index.llms.openai_like import OpenAILike
 
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
+from elasticsearch.exceptions import NotFoundError
 
 try:
     from llama_index.vector_stores.elasticsearch import ElasticsearchVectorStore
 except ImportError:  # pragma: no cover - fallback for older LlamaIndex versions
     from llama_index.vector_stores.elasticsearch import ElasticsearchStore as ElasticsearchVectorStore
+
+
+@dataclass
+class _TenantRuntime:
+    """Runtime objects bound to a tenant-specific Elasticsearch namespace."""
+
+    tenant_id: Optional[str]
+    normalized_id: Optional[str]
+    vector_index: str
+    keyword_index: str
+    vector_alias: Optional[str]
+    keyword_alias: Optional[str]
+    vector_store: Optional[ElasticsearchVectorStore] = None
+    storage_context: Optional[StorageContext] = None
+    index: Optional[VectorStoreIndex] = None
+    keyword_index_checked: bool = False
 
 
 class AsyncRAGEngine:
@@ -64,7 +83,6 @@ class AsyncRAGEngine:
         """初始化异步RAG引擎"""
         self.data_dir = Path(data_dir)
         self.persist_dir = Path(persist_dir)
-        self.index = None
         self.logger = self._setup_logger()
         
         # 性能优化配置
@@ -76,8 +94,6 @@ class AsyncRAGEngine:
         # 文件处理缓存
         self.file_cache_path = self.cache_dir / "file_cache.json"
         self.file_cache = self._load_file_cache()
-        self.vector_store = None
-        self.storage_context = None
         self.es_client = None
         
         # 配置LlamaIndex设置 - 使用自定义DeepSeek LLM
@@ -95,8 +111,8 @@ class AsyncRAGEngine:
         
         # Elasticsearch 相关配置
         self.es_url = es_url or os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
-        self.es_index = os.getenv("ELASTICSEARCH_INDEX", es_index)
-        self.es_keyword_index = os.getenv("ELASTICSEARCH_TEXT_INDEX", es_keyword_index)
+        self.es_index_template = os.getenv("ELASTICSEARCH_INDEX", es_index)
+        self.es_keyword_index_template = os.getenv("ELASTICSEARCH_TEXT_INDEX", es_keyword_index)
         self.es_user = es_user or os.getenv("ELASTICSEARCH_USER")
         self.es_password = es_password or os.getenv("ELASTICSEARCH_PASSWORD")
         self.es_api_key = os.getenv("ELASTICSEARCH_API_KEY")
@@ -109,7 +125,8 @@ class AsyncRAGEngine:
         self.es_timeout = int(timeout_env) if timeout_env and timeout_env.isdigit() else None
         analyzer_env = os.getenv("ELASTICSEARCH_TEXT_ANALYZER")
         self.es_text_analyzer = analyzer_env or es_text_analyzer or "standard"
-        self._keyword_index_checked = False
+        self._default_tenant_key = "__default__"
+        self._tenant_states: Dict[str, _TenantRuntime] = {}
 
         # 线程池用于并行处理
         self._thread_pool = ThreadPoolExecutor(max_workers=max_workers)
@@ -129,6 +146,156 @@ class AsyncRAGEngine:
             es_kwargs["request_timeout"] = self.es_timeout
         return es_kwargs
 
+    def _tenant_key(self, tenant_id: Optional[str]) -> str:
+        """Compute a stable dictionary key for tenant-scoped runtime objects."""
+        if tenant_id is None:
+            return self._default_tenant_key
+        normalized = self._normalize_tenant_id(tenant_id)
+        return f"tenant::{normalized}"
+
+    def _normalize_tenant_id(self, tenant_id: str) -> str:
+        """Normalize tenant identifiers to Elasticsearch-safe names."""
+        candidate = tenant_id.strip().lower()
+        candidate = re.sub(r"[^a-z0-9_-]+", "-", candidate)
+        candidate = re.sub(r"-{2,}", "-", candidate).strip("-_")
+        if not candidate:
+            raise ValueError(f"非法的租户标识: {tenant_id!r}")
+        if candidate[0] in {"-", "_"}:
+            candidate = re.sub(r"^[-_]+", "", candidate)
+        if not candidate:
+            raise ValueError(f"非法的租户标识: {tenant_id!r}")
+        return candidate
+
+    def _create_tenant_runtime(self, tenant_id: Optional[str]) -> _TenantRuntime:
+        """Instantiate a runtime container for the given tenant."""
+        if tenant_id is None:
+            return _TenantRuntime(
+                tenant_id=None,
+                normalized_id=None,
+                vector_index=self.es_index_template,
+                keyword_index=self.es_keyword_index_template,
+                vector_alias=None,
+                keyword_alias=None,
+            )
+
+        normalized = self._normalize_tenant_id(tenant_id)
+        vector_index = f"{normalized}-{self.es_index_template}"
+        keyword_index = f"{normalized}-{self.es_keyword_index_template}"
+        vector_alias = f"tenant_{normalized}"
+        keyword_alias = f"{vector_alias}_keyword"
+
+        self.logger.debug(
+            "创建租户运行时配置 tenant=%s -> vector_index=%s, keyword_index=%s",
+            tenant_id,
+            vector_index,
+            keyword_index,
+        )
+        return _TenantRuntime(
+            tenant_id=tenant_id,
+            normalized_id=normalized,
+            vector_index=vector_index,
+            keyword_index=keyword_index,
+            vector_alias=vector_alias,
+            keyword_alias=keyword_alias,
+        )
+
+    def _get_tenant_runtime(self, tenant_id: Optional[str]) -> _TenantRuntime:
+        """Fetch or initialize runtime state for a tenant."""
+        key = self._tenant_key(tenant_id)
+        runtime = self._tenant_states.get(key)
+        if runtime is None:
+            runtime = self._create_tenant_runtime(tenant_id)
+            self._tenant_states[key] = runtime
+        return runtime
+
+    @staticmethod
+    def _vector_target(runtime: _TenantRuntime) -> str:
+        """Return the preferred index/alias for vector operations."""
+        return runtime.vector_alias or runtime.vector_index
+
+    @staticmethod
+    def _keyword_target(runtime: _TenantRuntime) -> str:
+        """Return the preferred index/alias for keyword operations."""
+        return runtime.keyword_alias or runtime.keyword_index
+
+    def _ensure_alias(self, index_name: str, alias_name: Optional[str]):
+        """Ensure an alias points to the expected index."""
+        if not alias_name or not self.es_client:
+            return
+
+        try:
+            exists = self.es_client.indices.exists(index=index_name)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.warning("检测索引 %s 是否存在失败: %s", index_name, exc)
+            return
+
+        if not exists:
+            # Physical index will be created lazily; alias can wait.
+            return
+
+        try:
+            aliases = self.es_client.indices.get_alias(name=alias_name)
+        except NotFoundError:
+            try:
+                self.es_client.indices.put_alias(index=index_name, name=alias_name)
+                self.logger.debug("创建别名 %s -> %s", alias_name, index_name)
+            except Exception as alias_exc:
+                self.logger.warning("创建别名 %s 失败: %s", alias_name, alias_exc)
+            return
+        except Exception as exc:
+            self.logger.warning("获取别名 %s 信息失败: %s", alias_name, exc)
+            return
+
+        if index_name in aliases:
+            return
+
+        actions = [{"remove": {"index": idx, "alias": alias_name}} for idx in aliases.keys()]
+        actions.append({"add": {"index": index_name, "alias": alias_name}})
+
+        try:
+            self.es_client.indices.update_aliases({"actions": actions})
+            self.logger.debug("更新别名 %s -> %s", alias_name, index_name)
+        except Exception as exc:
+            self.logger.warning("更新别名 %s 指向失败: %s", alias_name, exc)
+
+    @property
+    def index(self) -> Optional[VectorStoreIndex]:
+        """向后兼容的默认租户索引访问器"""
+        return self._get_tenant_runtime(None).index
+
+    @index.setter
+    def index(self, value: Optional[VectorStoreIndex]):
+        runtime = self._get_tenant_runtime(None)
+        runtime.index = value
+
+    def _vector_index_from_nodes(
+        self,
+        runtime: _TenantRuntime,
+        nodes: List[Document],
+    ) -> VectorStoreIndex:
+        """Create a vector index from nodes with backwards compatibility."""
+        if hasattr(VectorStoreIndex, "from_nodes"):
+            return VectorStoreIndex.from_nodes(
+                nodes,
+                storage_context=runtime.storage_context,
+            )
+        return VectorStoreIndex(
+            nodes=nodes,
+            storage_context=runtime.storage_context,
+        )
+
+    def _vector_index_from_store(self, runtime: _TenantRuntime) -> VectorStoreIndex:
+        """Load a vector index from an existing store, handling API changes."""
+        if hasattr(VectorStoreIndex, "from_vector_store"):
+            return VectorStoreIndex.from_vector_store(
+                runtime.vector_store,
+                storage_context=runtime.storage_context,
+            )
+        return VectorStoreIndex(
+            vector_store=runtime.vector_store,
+            storage_context=runtime.storage_context,
+        )
+
     def _ensure_es_client(self, force: bool = False):
         """确保 Elasticsearch 客户端已初始化"""
         if self.es_client is not None and not force:
@@ -147,24 +314,28 @@ class AsyncRAGEngine:
         except Exception as exc:  # pragma: no cover - ping 失败不阻断
             self.logger.warning(f"Elasticsearch ping 失败: {exc}")
 
-    def _ensure_keyword_index(self, force: bool = False):
+    def _ensure_keyword_index(self, tenant_id: Optional[str] = None, force: bool = False):
         """确保关键字检索索引已准备"""
         self._ensure_es_client()
+        runtime = self._get_tenant_runtime(tenant_id)
 
         if force:
             try:
-                self.es_client.indices.delete(index=self.es_keyword_index, ignore_unavailable=True)
-                self.logger.info(f"已删除 Elasticsearch 关键字索引 {self.es_keyword_index}")
+                self.es_client.indices.delete(index=runtime.keyword_index, ignore_unavailable=True)
+                self.logger.info(
+                    "已删除 Elasticsearch 关键字索引 %s",
+                    runtime.keyword_index,
+                )
             except Exception as exc:
                 self.logger.warning(f"删除关键字索引失败: {exc}")
             finally:
-                self._keyword_index_checked = False
+                runtime.keyword_index_checked = False
 
-        if self._keyword_index_checked:
+        if runtime.keyword_index_checked:
             return
 
         try:
-            exists = self.es_client.indices.exists(index=self.es_keyword_index)
+            exists = self.es_client.indices.exists(index=runtime.keyword_index)
         except Exception as exc:
             self.logger.error(f"检测关键字索引失败: {exc}")
             raise
@@ -188,17 +359,26 @@ class AsyncRAGEngine:
             }
 
             try:
-                self.es_client.indices.create(index=self.es_keyword_index, body=index_body)
-                self.logger.info(f"Elasticsearch 关键字索引已创建: {self.es_keyword_index}")
+                self.es_client.indices.create(index=runtime.keyword_index, body=index_body)
+                self.logger.info(
+                    "Elasticsearch 关键字索引已创建: %s",
+                    runtime.keyword_index,
+                )
             except Exception as exc:
                 self.logger.error(f"创建关键字索引失败: {exc}")
                 raise
+        else:
+            self.logger.debug(
+                "检测到现有关键字索引: %s",
+                runtime.keyword_index,
+            )
 
-        self._keyword_index_checked = True
+        runtime.keyword_index_checked = True
+        self._ensure_alias(runtime.keyword_index, runtime.keyword_alias)
 
-    def _reset_keyword_index(self):
+    def _reset_keyword_index(self, tenant_id: Optional[str] = None):
         """强制重建关键字索引"""
-        self._ensure_keyword_index(force=True)
+        self._ensure_keyword_index(tenant_id=tenant_id, force=True)
 
     def _setup_logger(self) -> logging.Logger:
         """配置日志记录器"""
@@ -241,55 +421,73 @@ class AsyncRAGEngine:
                 model_name="sentence-transformers/all-MiniLM-L6-v2"
             )
     
-    def _init_vector_store(self, force: bool = False):
+    def _init_vector_store(self, tenant_id: Optional[str] = None, force: bool = False) -> _TenantRuntime:
         """初始化或重建 Elasticsearch 向量存储"""
-        if self.vector_store is not None and self.storage_context is not None and not force:
-            return
-        
+        runtime = self._get_tenant_runtime(tenant_id)
+
+        if runtime.vector_store is not None and runtime.storage_context is not None and not force:
+            return runtime
+
         self._ensure_es_client(force=force)
 
         try:
-            self.vector_store = ElasticsearchVectorStore(
-                index_name=self.es_index,
+            runtime.vector_store = ElasticsearchVectorStore(
+                index_name=runtime.vector_index,
                 es_url=self.es_url,
                 es_user=self.es_user,
                 es_password=self.es_password,
                 es_api_key=self.es_api_key,
             )
-            self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
-            self.logger.info(f"Elasticsearch 向量索引已准备: {self.es_index}")
+            runtime.storage_context = StorageContext.from_defaults(vector_store=runtime.vector_store)
+            self._ensure_alias(runtime.vector_index, runtime.vector_alias)
+            self.logger.info(
+                "Elasticsearch 向量索引已准备: %s",
+                self._vector_target(runtime),
+            )
         except Exception as exc:
             self.logger.error(f"初始化 Elasticsearch 向量存储失败: {exc}")
             raise
+        return runtime
     
-    def _ensure_vector_store(self):
+    def _ensure_vector_store(self, tenant_id: Optional[str] = None) -> _TenantRuntime:
         """确保向量存储已初始化"""
-        if self.vector_store is None or self.storage_context is None:
-            self._init_vector_store()
+        runtime = self._get_tenant_runtime(tenant_id)
+        if runtime.vector_store is None or runtime.storage_context is None:
+            runtime = self._init_vector_store(tenant_id=tenant_id)
+        return runtime
     
-    def _reset_vector_index(self):
+    def _reset_vector_index(self, tenant_id: Optional[str] = None):
         """删除并重建 Elasticsearch 索引"""
-        self._ensure_vector_store()
+        runtime = self._ensure_vector_store(tenant_id=tenant_id)
         
         try:
-            delete_method = getattr(self.vector_store, "delete_index", None)
+            delete_method = getattr(runtime.vector_store, "delete_index", None)
             if callable(delete_method):
                 delete_method()
-                self.logger.info(f"已清空 Elasticsearch 向量索引 {self.es_index}")
+                self.logger.info(
+                    "已清空 Elasticsearch 向量索引 %s",
+                    runtime.vector_index,
+                )
             else:
-                self.es_client.indices.delete(index=self.es_index, ignore_unavailable=True)
-                self.logger.info(f"已删除 Elasticsearch 索引 {self.es_index}")
+                self.es_client.indices.delete(index=runtime.vector_index, ignore_unavailable=True)
+                self.logger.info(
+                    "已删除 Elasticsearch 索引 %s",
+                    runtime.vector_index,
+                )
         except Exception as exc:
             self.logger.warning(f"删除 Elasticsearch 索引失败: {exc}")
         finally:
-            self._init_vector_store(force=True)
+            new_runtime = self._init_vector_store(tenant_id=tenant_id, force=True)
+            self._ensure_alias(new_runtime.vector_index, new_runtime.vector_alias)
     
-    def _refresh_vector_index(self):
+    def _refresh_vector_index(self, tenant_id: Optional[str] = None):
         """刷新 Elasticsearch 索引以便查询"""
         if not self.es_client:
             return
+        runtime = self._get_tenant_runtime(tenant_id)
         try:
-            self.es_client.indices.refresh(index=self.es_index)
+            self.es_client.indices.refresh(index=runtime.vector_index)
+            self._ensure_alias(runtime.vector_index, runtime.vector_alias)
         except Exception as exc:
             self.logger.warning(f"刷新 Elasticsearch 索引失败: {exc}")
     
@@ -672,12 +870,13 @@ class AsyncRAGEngine:
                 documents.append(doc)
         return documents
 
-    def _index_keyword_nodes(self, nodes: List[Any]) -> int:
+    def _index_keyword_nodes(self, nodes: List[Any], tenant_id: Optional[str] = None) -> int:
         """将切分后的文本节点写入关键字索引，并返回写入数量"""
         if not nodes:
             return 0
 
-        self._ensure_keyword_index()
+        runtime = self._get_tenant_runtime(tenant_id)
+        self._ensure_keyword_index(tenant_id=tenant_id)
 
         actions = []
         chunk_counters: Dict[str, int] = {}
@@ -702,7 +901,7 @@ class AsyncRAGEngine:
 
             action = {
                 "_op_type": "index",
-                "_index": self.es_keyword_index,
+                "_index": runtime.keyword_index,
                 "_id": chunk_id,
                 "document_id": doc_hash,
                 "chunk_id": chunk_id,
@@ -728,9 +927,12 @@ class AsyncRAGEngine:
                 chunk_size=500,
                 request_timeout=self.es_timeout or 30,
             )
-            self.es_client.indices.refresh(index=self.es_keyword_index)
+            self.es_client.indices.refresh(index=runtime.keyword_index)
+            self._ensure_alias(runtime.keyword_index, runtime.keyword_alias)
             self.logger.info(
-                f"关键字索引 {self.es_keyword_index} 已更新 {len(actions)} 个文本分块"
+                "关键字索引 %s 已更新 %s 个文本分块",
+                self._keyword_target(runtime),
+                len(actions),
             )
             return len(actions)
         except Exception as exc:
@@ -840,10 +1042,11 @@ class AsyncRAGEngine:
         self,
         documents: Optional[List[Document]] = None,
         reset_existing: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> VectorStoreIndex:
         """异步构建向量索引（写入 Elasticsearch）"""
         self.logger.info("构建向量索引（Elasticsearch）...")
-        self._ensure_vector_store()
+        runtime = self._ensure_vector_store(tenant_id=tenant_id)
         
         if documents is None:
             # 加载数据目录中的文档
@@ -860,33 +1063,31 @@ class AsyncRAGEngine:
             raise ValueError("无法从文档生成有效的文本分块")
 
         if reset_existing:
-            await loop.run_in_executor(None, self._reset_vector_index)
-            await loop.run_in_executor(None, self._reset_keyword_index)
+            await loop.run_in_executor(None, lambda: self._reset_vector_index(tenant_id))
+            await loop.run_in_executor(None, lambda: self._reset_keyword_index(tenant_id))
 
         def _build() -> VectorStoreIndex:
-            return VectorStoreIndex.from_nodes(
-                nodes,
-                storage_context=self.storage_context,
-            )
+            return self._vector_index_from_nodes(runtime, nodes)
 
         index = await loop.run_in_executor(None, _build)
-        await loop.run_in_executor(None, self._refresh_vector_index)
-        await loop.run_in_executor(None, lambda: self._index_keyword_nodes(nodes))
+        await loop.run_in_executor(None, lambda: self._refresh_vector_index(tenant_id))
+        await loop.run_in_executor(None, lambda: self._index_keyword_nodes(nodes, tenant_id=tenant_id))
 
         self.logger.info("Elasticsearch 向量索引构建完成")
-        self.index = index
+        runtime.index = index
         return index
     
     async def ingest_documents_async(
         self,
         documents: List[Dict[str, Any]],
         reset_existing: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, int]:
         """接收外部服务提交的文档并写入索引"""
         if not documents:
             raise ValueError("文档列表不能为空")
 
-        self._ensure_vector_store()
+        runtime = self._ensure_vector_store(tenant_id=tenant_id)
         loop = asyncio.get_event_loop()
 
         doc_objects: List[Document] = []
@@ -936,31 +1137,28 @@ class AsyncRAGEngine:
         created_new_index = False
 
         if reset_existing:
-            await loop.run_in_executor(None, self._reset_vector_index)
-            await loop.run_in_executor(None, self._reset_keyword_index)
-            self.index = None
+            await loop.run_in_executor(None, lambda: self._reset_vector_index(tenant_id))
+            await loop.run_in_executor(None, lambda: self._reset_keyword_index(tenant_id))
+            runtime.index = None
 
-        if self.index is None and not reset_existing:
-            existing_index = await self.load_index_async()
+        if runtime.index is None and not reset_existing:
+            existing_index = await self.load_index_async(tenant_id=tenant_id)
             if existing_index is not None:
-                self.index = existing_index
+                runtime.index = existing_index
 
-        if self.index is None:
+        if runtime.index is None:
             def _build_nodes() -> VectorStoreIndex:
-                return VectorStoreIndex.from_nodes(
-                    nodes,
-                    storage_context=self.storage_context,
-                )
+                return self._vector_index_from_nodes(runtime, nodes)
 
-            self.index = await loop.run_in_executor(None, _build_nodes)
+            runtime.index = await loop.run_in_executor(None, _build_nodes)
             created_new_index = True
         else:
-            await loop.run_in_executor(None, lambda: self.index.insert_nodes(nodes))
+            await loop.run_in_executor(None, lambda: runtime.index.insert_nodes(nodes))
 
-        await loop.run_in_executor(None, self._refresh_vector_index)
+        await loop.run_in_executor(None, lambda: self._refresh_vector_index(tenant_id))
         keyword_chunks = await loop.run_in_executor(
             None,
-            lambda: self._index_keyword_nodes(nodes),
+            lambda: self._index_keyword_nodes(nodes, tenant_id=tenant_id),
         )
 
         return {
@@ -971,15 +1169,15 @@ class AsyncRAGEngine:
             "created_new_index": created_new_index,
         }
     
-    async def load_index_async(self) -> Optional[VectorStoreIndex]:
+    async def load_index_async(self, tenant_id: Optional[str] = None) -> Optional[VectorStoreIndex]:
         """异步加载已存在的 Elasticsearch 索引"""
-        self._ensure_vector_store()
+        runtime = self._ensure_vector_store(tenant_id=tenant_id)
         loop = asyncio.get_event_loop()
         
         try:
             index_exists = await loop.run_in_executor(
                 None,
-                lambda: self.es_client.indices.exists(index=self.es_index),
+                lambda: self.es_client.indices.exists(index=runtime.vector_index),
             )
         except Exception as exc:
             self.logger.warning(f"检测 Elasticsearch 索引失败: {exc}")
@@ -990,33 +1188,35 @@ class AsyncRAGEngine:
             return None
         
         def _load() -> VectorStoreIndex:
-            return VectorStoreIndex.from_vector_store(
-                self.vector_store,
-                storage_context=self.storage_context,
-            )
+            return self._vector_index_from_store(runtime)
         
         try:
             index = await loop.run_in_executor(None, _load)
-            self.logger.info("成功连接到 Elasticsearch 向量索引")
-            self.index = index
+            runtime.index = index
+            self.logger.info(
+                "成功连接到 Elasticsearch 向量索引: %s",
+                self._vector_target(runtime),
+            )
             return index
         except Exception as exc:
             self.logger.warning(f"加载 Elasticsearch 索引失败: {exc}")
             return None
     
-    async def get_or_create_index_async(self) -> VectorStoreIndex:
+    async def get_or_create_index_async(self, tenant_id: Optional[str] = None) -> VectorStoreIndex:
         """异步获取或创建索引"""
-        index = await self.load_index_async()
+        index = await self.load_index_async(tenant_id=tenant_id)
         if index is None:
-            index = await self.build_index_async()
+            index = await self.build_index_async(tenant_id=tenant_id)
         
-        self.index = index
+        runtime = self._get_tenant_runtime(tenant_id)
+        runtime.index = index
         return index
     
     async def query_async(
         self,
         question: str,
         search_params: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """根据请求参数执行 RAG 或关键字检索"""
         params = search_params or {}
@@ -1029,6 +1229,7 @@ class AsyncRAGEngine:
                 question,
                 top_k=int(top_k) if isinstance(top_k, (int, float, str)) else 5,
                 min_score=min_score,
+                tenant_id=tenant_id,
             )
 
         top_k = params.get("top_k") or params.get("similarity_top_k")
@@ -1037,6 +1238,7 @@ class AsyncRAGEngine:
             question,
             similarity_top_k=top_k,
             response_mode=response_mode,
+            tenant_id=tenant_id,
         )
 
     async def rag_search_async(
@@ -1044,11 +1246,15 @@ class AsyncRAGEngine:
         question: str,
         similarity_top_k: Optional[Any] = None,
         response_mode: str = "compact",
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """执行基于向量的 RAG 检索"""
-        self._ensure_vector_store()
-        if self.index is None:
-            await self.get_or_create_index_async()
+        runtime = self._ensure_vector_store(tenant_id=tenant_id)
+        if runtime.index is None:
+            await self.get_or_create_index_async(tenant_id=tenant_id)
+            runtime = self._get_tenant_runtime(tenant_id)
+        if runtime.index is None:
+            raise RuntimeError("向量索引尚未初始化，无法执行检索")
 
         loop = asyncio.get_event_loop()
         top_k = 5
@@ -1058,7 +1264,7 @@ class AsyncRAGEngine:
             except (TypeError, ValueError):
                 top_k = 5
 
-        query_engine = self.index.as_query_engine(
+        query_engine = runtime.index.as_query_engine(
             response_mode=response_mode,
             similarity_top_k=top_k,
         )
@@ -1081,10 +1287,12 @@ class AsyncRAGEngine:
         question: str,
         top_k: int = 5,
         min_score: Optional[Any] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """执行基于关键字的 Elasticsearch 检索"""
         self._ensure_es_client()
-        self._ensure_keyword_index()
+        runtime = self._get_tenant_runtime(tenant_id)
+        self._ensure_keyword_index(tenant_id=tenant_id)
 
         loop = asyncio.get_event_loop()
 
@@ -1121,7 +1329,8 @@ class AsyncRAGEngine:
             }
             if min_score_value is not None:
                 body["min_score"] = min_score_value
-            return self.es_client.search(index=self.es_keyword_index, body=body)
+            search_index = self._keyword_target(runtime)
+            return self.es_client.search(index=search_index, body=body)
 
         try:
             search_result = await loop.run_in_executor(None, _search)
@@ -1208,8 +1417,9 @@ class AsyncRAGEngine:
     
     def get_status(self) -> Dict[str, Any]:
         """获取系统状态信息"""
+        runtime = self._get_tenant_runtime(None)
         return {
-            'index_ready': self.index is not None,
+            'index_ready': runtime.index is not None,
             'data_dir': str(self.data_dir),
             'persist_dir': str(self.persist_dir),
             'parallel_enabled': self.enable_parallel,
@@ -1217,11 +1427,15 @@ class AsyncRAGEngine:
             'cached_files': len(self.file_cache),
             'vector_store': 'elasticsearch',
             'elasticsearch_url': self.es_url,
-            'elasticsearch_index': self.es_index,
-            'keyword_index': self.es_keyword_index,
+            'elasticsearch_index': runtime.vector_index,
+            'keyword_index': runtime.keyword_index,
             'text_analyzer': self.es_text_analyzer,
-            'keyword_index_initialized': self._keyword_index_checked,
+            'keyword_index_initialized': runtime.keyword_index_checked,
         }
+
+    def has_index(self, tenant_id: Optional[str] = None) -> bool:
+        """检查指定租户的向量索引是否已初始化"""
+        return self._get_tenant_runtime(tenant_id).index is not None
     
     def __del__(self):
         """清理资源"""

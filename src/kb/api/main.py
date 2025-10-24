@@ -34,9 +34,9 @@ async def lifespan(app: FastAPI):
         max_workers=4
     )
     logging.info(
-        "Elasticsearch vector store -> %s (index: %s)",
+        "Elasticsearch vector store -> %s (index template: %s)",
         rag_engine.es_url,
-        rag_engine.es_index,
+        rag_engine.es_index_template,
     )
     
     # 初始化任务管理器
@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
     # 尝试加载现有索引
     try:
         await rag_engine.get_or_create_index_async()
-        logging.info("RAG索引加载成功")
+        logging.info("默认租户索引加载成功")
     except Exception as e:
         logging.warning(f"RAG索引加载失败: {e}")
     
