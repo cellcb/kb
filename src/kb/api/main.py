@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     )
     
     # 初始化任务管理器
-    task_manager = TaskManager(max_concurrent_tasks=3)
+    task_manager = TaskManager(max_concurrent_tasks=3, rag_engine=rag_engine)
     await task_manager.start_workers()
     
     # 设置全局依赖

@@ -2,20 +2,28 @@
 
 import json
 import os
+import re
 import uuid
-from pathlib import Path
-from typing import List, Dict, Any, Optional
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import BackgroundTasks, APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
-from ..models.documents import (
-    UploadResponse, DocumentListResponse, DocumentInfo, ProcessingOptions,
-    IndexRebuildRequest, ConfigUpdate, DocumentStatus,
-    IngestRequest, IngestResponse,
-)
+from ...core.task_manager import QueuedDocument
 from ..dependencies import get_rag_engine, get_task_manager, get_tenant_id
+from ..models.documents import (
+    ConfigUpdate,
+    DocumentInfo,
+    DocumentListResponse,
+    DocumentStatus,
+    IndexRebuildRequest,
+    IngestRequest,
+    IngestResponse,
+    ProcessingOptions,
+    UploadResponse,
+)
 
 
 router = APIRouter()
@@ -142,13 +150,40 @@ async def ingest_documents_from_files(
     )
 
 
+DOCUMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _metadata_path_for(file_path: Path) -> Path:
+    """返回与文件对应的元数据路径"""
+    return file_path.with_suffix(file_path.suffix + ".meta.json")
+
+
+def _load_document_metadata(file_path: Path) -> Dict[str, Any]:
+    """读取上传文件的元数据，如不存在则返回空"""
+    meta_path = _metadata_path_for(file_path)
+    if not meta_path.exists():
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as meta_file:
+            data = json.load(meta_file)
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
 @router.post("/documents/upload", response_model=UploadResponse, summary="上传文档")
 async def upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     parallel_workers: int = Form(4),
     enable_batch_processing: bool = Form(True),
-    priority: str = Form("normal")
+    priority: str = Form("normal"),
+    document_ids: Optional[str] = Form(
+        None,
+        description="可选，自定义文档ID。支持 JSON 数组（按文件顺序）或 JSON 对象（filename -> document_id）。",
+    ),
 ):
     """
     上传一个或多个文档进行处理
@@ -169,7 +204,45 @@ async def upload_documents(
         # 验证文件格式
         allowed_extensions = {'.pdf', '.txt'}
         uploaded_files = []
-        
+        document_id_map: Dict[str, str] = {}
+        document_id_sequence: List[str] = []
+        sequence_index = 0
+
+        if document_ids:
+            try:
+                parsed_ids = json.loads(document_ids)
+            except json.JSONDecodeError:
+                parsed_ids = document_ids.strip()
+
+            if isinstance(parsed_ids, dict):
+                for key, value in parsed_ids.items():
+                    if not isinstance(value, str) or not value.strip():
+                        raise HTTPException(
+                            status_code=400,
+                            detail="document_ids 中的值必须为非空字符串",
+                        )
+                    document_id_map[str(key)] = value.strip()
+            elif isinstance(parsed_ids, list):
+                cleaned = []
+                for item in parsed_ids:
+                    if not isinstance(item, str) or not item.strip():
+                        raise HTTPException(
+                            status_code=400,
+                            detail="document_ids 数组元素必须为非空字符串",
+                        )
+                    cleaned.append(item.strip())
+                document_id_sequence = cleaned
+            elif isinstance(parsed_ids, str):
+                if parsed_ids:
+                    document_id_sequence = [parsed_ids]
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="document_ids 仅支持 JSON 对象或数组",
+                )
+
+        queued_documents: List[QueuedDocument] = []
+
         for file in files:
             if not file.filename:
                 raise HTTPException(status_code=400, detail="文件名不能为空")
@@ -195,35 +268,73 @@ async def upload_documents(
         data_dir = rag_engine.data_dir
         data_dir.mkdir(exist_ok=True)
         
-        saved_files = []
         document_infos = []
-        
         for file in uploaded_files:
-            # 生成唯一文件名避免冲突
-            file_id = uuid.uuid4().hex[:8]
             original_name = file.filename
+            file_id = uuid.uuid4().hex[:8]
+            provided_id = document_id_map.get(original_name)
+            if provided_id is None and sequence_index < len(document_id_sequence):
+                provided_id = document_id_sequence[sequence_index]
+                sequence_index += 1
+
+            if provided_id:
+                document_id = provided_id.strip()
+                if not DOCUMENT_ID_PATTERN.fullmatch(document_id):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"document_id '{document_id}' 仅支持字母、数字、下划线、点和连字符",
+                    )
+            else:
+                document_id = f"doc_{file_id}"
+
             name_parts = Path(original_name).stem, Path(original_name).suffix
             unique_filename = f"{name_parts[0]}_{file_id}{name_parts[1]}"
-            
             file_path = data_dir / unique_filename
-            
-            # 保存文件
+
             content = await file.read()
             with open(file_path, 'wb') as f:
                 f.write(content)
-            
-            saved_files.append(file_path)
-            
-            # 创建文档信息
+
+            upload_time = datetime.now()
+            metadata_payload = {
+                "document_id": document_id,
+                "original_filename": original_name,
+                "saved_filename": unique_filename,
+                "upload_time": upload_time.isoformat(),
+                "file_size": len(content),
+            }
+            metadata_path = _metadata_path_for(file_path)
+            try:
+                with open(metadata_path, "w", encoding="utf-8") as meta_file:
+                    json.dump(metadata_payload, meta_file, ensure_ascii=False, indent=2)
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"写入元数据失败: {exc}",
+                )
+
+            queued_documents.append(
+                QueuedDocument(
+                    path=file_path,
+                    document_id=document_id,
+                    filename=original_name,
+                    metadata={
+                        "saved_filename": unique_filename,
+                        "upload_time": upload_time.isoformat(),
+                        "file_size": len(content),
+                    },
+                )
+            )
+
             doc_info = DocumentInfo(
-                document_id=f"doc_{file_id}",
+                document_id=document_id,
                 filename=original_name,
-                upload_time=datetime.now(),
+                upload_time=upload_time,
                 file_size=len(content),
                 status=DocumentStatus.UPLOADED
             )
             document_infos.append(doc_info)
-        
+
         # 提交处理任务
         task_manager = get_task_manager()
         options = {
@@ -232,7 +343,7 @@ async def upload_documents(
             'priority': priority
         }
         
-        task_id = await task_manager.submit_task(saved_files, options)
+        task_id = await task_manager.submit_task(queued_documents, options)
         
         # 估算处理时间
         total_size_mb = sum(info.file_size for info in document_infos) / (1024 * 1024)
@@ -281,26 +392,45 @@ async def list_documents():
         total_size = 0
         
         for file_path in data_dir.iterdir():
-            if file_path.is_file():
-                file_stat = file_path.stat()
-                total_size += file_stat.st_size
-                
-                # 从缓存中获取字符数信息（如果有的话）
-                char_count = None
-                if hasattr(rag_engine, 'file_cache'):
-                    cache_key = str(file_path)
-                    cached_info = rag_engine.file_cache.get(cache_key, {})
-                    char_count = cached_info.get('char_count')
-                
-                doc_info = DocumentInfo(
-                    document_id=f"doc_{file_path.stem}",
-                    filename=file_path.name,
-                    upload_time=datetime.fromtimestamp(file_stat.st_mtime),
-                    file_size=file_stat.st_size,
-                    status=DocumentStatus.INDEXED,  # 假设已存在的文件都已索引
-                    char_count=char_count
-                )
-                documents.append(doc_info)
+            if not file_path.is_file() or file_path.name.endswith(".meta.json"):
+                continue
+
+            file_stat = file_path.stat()
+            metadata = _load_document_metadata(file_path)
+            document_id = metadata.get("document_id") or f"doc_{file_path.stem}"
+            display_name = metadata.get("original_filename") or file_path.name
+
+            upload_time = datetime.fromtimestamp(file_stat.st_mtime)
+            meta_upload_time = metadata.get("upload_time")
+            if isinstance(meta_upload_time, str):
+                try:
+                    upload_time = datetime.fromisoformat(meta_upload_time)
+                except ValueError:
+                    pass
+
+            file_size = metadata.get("file_size")
+            if isinstance(file_size, (int, float)):
+                file_size = int(file_size)
+            else:
+                file_size = file_stat.st_size
+
+            total_size += file_size
+
+            char_count = None
+            if hasattr(rag_engine, 'file_cache'):
+                cache_key = str(file_path)
+                cached_info = rag_engine.file_cache.get(cache_key, {})
+                char_count = cached_info.get('char_count')
+            
+            doc_info = DocumentInfo(
+                document_id=document_id,
+                filename=display_name,
+                upload_time=upload_time,
+                file_size=file_size,
+                status=DocumentStatus.INDEXED,
+                char_count=char_count
+            )
+            documents.append(doc_info)
         
         # 按上传时间排序
         documents.sort(key=lambda x: x.upload_time, reverse=True)
@@ -332,20 +462,46 @@ async def delete_document(document_id: str):
         # 查找对应的文件
         deleted_files = []
         for file_path in data_dir.iterdir():
-            if file_path.is_file() and document_id in file_path.stem:
-                file_path.unlink()  # 删除文件
-                deleted_files.append(file_path.name)
-                
-                # 从缓存中移除
-                if hasattr(rag_engine, 'file_cache'):
-                    cache_key = str(file_path)
-                    rag_engine.file_cache.pop(cache_key, None)
-                    rag_engine._save_file_cache()
+            if not file_path.is_file() or file_path.name.endswith(".meta.json"):
+                continue
+
+            metadata = _load_document_metadata(file_path)
+            current_id = metadata.get("document_id")
+            matches = current_id == document_id or (
+                current_id is None and document_id in file_path.stem
+            )
+            if not matches:
+                continue
+
+            file_path.unlink()
+            deleted_files.append(file_path.name)
+
+            meta_path = _metadata_path_for(file_path)
+            if meta_path.exists():
+                try:
+                    meta_path.unlink()
+                except OSError:
+                    pass
+            
+            if hasattr(rag_engine, 'file_cache'):
+                cache_key = str(file_path)
+                rag_engine.file_cache.pop(cache_key, None)
+                rag_engine._save_file_cache()
         
         if not deleted_files:
             raise HTTPException(
                 status_code=404,
                 detail=f"文档 {document_id} 不存在"
+            )
+
+        try:
+            await rag_engine.delete_document_async(document_id=document_id)
+        except ValueError:
+            pass
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"删除索引中的文档失败: {exc}"
             )
         
         return {

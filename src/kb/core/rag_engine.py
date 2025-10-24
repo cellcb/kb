@@ -7,7 +7,7 @@ import asyncio
 import logging
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Callable
+from typing import List, Optional, Dict, Any, Callable, Set
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -1131,6 +1131,7 @@ class AsyncRAGEngine:
 
         doc_objects: List[Document] = []
         raw_chunks = 0
+        document_ids_for_refresh: Set[str] = set()
 
         for item in documents:
             document_id = item.get("document_id") or item.get("id")
@@ -1147,6 +1148,7 @@ class AsyncRAGEngine:
             base_metadata.setdefault("source", item.get("source", "remote_ingest"))
 
             chunk_list = item.get("chunks") or []
+            produced_chunks = 0
             if chunk_list:
                 for idx, chunk in enumerate(chunk_list):
                     text = (chunk.get("content") or "").strip()
@@ -1158,6 +1160,7 @@ class AsyncRAGEngine:
                     chunk_metadata["char_count"] = len(text)
                     doc_objects.append(Document(text=text, metadata=chunk_metadata))
                     raw_chunks += 1
+                    produced_chunks += 1
             else:
                 text = (item.get("content") or "").strip()
                 if not text:
@@ -1167,9 +1170,20 @@ class AsyncRAGEngine:
                 chunk_metadata["char_count"] = len(text)
                 doc_objects.append(Document(text=text, metadata=chunk_metadata))
                 raw_chunks += 1
+                produced_chunks += 1
+
+            if produced_chunks > 0:
+                document_ids_for_refresh.add(document_id)
 
         if not doc_objects:
             raise ValueError("没有可供索引的文档内容")
+
+        if document_ids_for_refresh:
+            def _delete_existing(doc_id: str):
+                self._delete_document_entries(doc_id, tenant_id=tenant_id)
+
+            for doc_id in document_ids_for_refresh:
+                await loop.run_in_executor(None, _delete_existing, doc_id)
 
         nodes = self._create_nodes(doc_objects)
 
@@ -1207,6 +1221,103 @@ class AsyncRAGEngine:
             "raw_chunks": raw_chunks,
             "created_new_index": created_new_index,
         }
+
+    def _delete_document_entries(
+        self,
+        document_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """删除指定文档在向量索引与关键字索引中的记录"""
+        if not document_id:
+            return {"vector_deleted": 0, "keyword_deleted": 0}
+
+        self._ensure_es_client()
+        runtime = self._get_tenant_runtime(tenant_id)
+
+        vector_deleted = 0
+        keyword_deleted = 0
+
+        vector_target = self._vector_target(runtime)
+        keyword_target = self._keyword_target(runtime)
+
+        vector_query = {
+            "query": {
+                "bool": {
+                    "should": [
+                        {"term": {"metadata.document_id.keyword": document_id}},
+                        {"term": {"metadata.document_id": document_id}},
+                        {"term": {"document_id.keyword": document_id}},
+                        {"term": {"document_id": document_id}},
+                        {"term": {"doc_id.keyword": document_id}},
+                        {"term": {"doc_id": document_id}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        }
+
+        try:
+            response = self.es_client.delete_by_query(
+                index=vector_target,
+                body=vector_query,
+                conflicts="proceed",
+                refresh=True,
+                ignore_unavailable=True,
+            )
+            vector_deleted = int(response.get("deleted", 0))
+        except Exception as exc:
+            self.logger.warning("删除向量索引中文档 %s 失败: %s", document_id, exc)
+
+        keyword_query = {
+            "query": {
+                "bool": {
+                    "should": [
+                        {"term": {"document_id.keyword": document_id}},
+                        {"term": {"document_id": document_id}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        }
+
+        try:
+            response = self.es_client.delete_by_query(
+                index=keyword_target,
+                body=keyword_query,
+                conflicts="proceed",
+                refresh=True,
+                ignore_unavailable=True,
+            )
+            keyword_deleted = int(response.get("deleted", 0))
+        except Exception as exc:
+            self.logger.warning("删除关键字索引中文档 %s 失败: %s", document_id, exc)
+
+        # 尝试刷新索引，忽略失败
+        try:
+            self._refresh_vector_index(tenant_id)
+        except Exception:
+            pass
+
+        return {
+            "vector_deleted": vector_deleted,
+            "keyword_deleted": keyword_deleted,
+        }
+
+    async def delete_document_async(
+        self,
+        document_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """异步删除索引中的文档"""
+        cleaned_id = (document_id or "").strip()
+        if not cleaned_id:
+            raise ValueError("document_id 不能为空")
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._delete_document_entries(cleaned_id, tenant_id=tenant_id),
+        )
     
     async def load_index_async(self, tenant_id: Optional[str] = None) -> Optional[VectorStoreIndex]:
         """异步加载已存在的 Elasticsearch 索引"""

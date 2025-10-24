@@ -3,21 +3,34 @@ Task Manager for Async Document Processing
 """
 
 import asyncio
-import uuid
 import logging
-from datetime import datetime
-from typing import Dict, List, Optional, Callable, Any
-from pathlib import Path
+import time
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ..api.models.documents import TaskStatus, DocumentStatus, TaskInfo, DocumentInfo, TaskProgress
+from ..api.models.documents import DocumentInfo, DocumentStatus, TaskInfo, TaskProgress, TaskStatus
+
+if TYPE_CHECKING:
+    from .rag_engine import AsyncRAGEngine
+
+
+@dataclass
+class QueuedDocument:
+    """待处理的文档描述"""
+    path: Path
+    document_id: str
+    filename: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class TaskData:
     """任务数据"""
     task_id: str
-    files: List[Path]
+    documents: List[QueuedDocument] = field(default_factory=list)
     options: Dict[str, Any] = field(default_factory=dict)
     status: TaskStatus = TaskStatus.QUEUED
     start_time: Optional[datetime] = None
@@ -25,18 +38,20 @@ class TaskData:
     progress: Dict[str, Any] = field(default_factory=dict)
     results: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
+    tenant_id: Optional[str] = None
 
 
 class TaskManager:
     """异步任务管理器"""
     
-    def __init__(self, max_concurrent_tasks: int = 3):
+    def __init__(self, max_concurrent_tasks: int = 3, rag_engine: Optional["AsyncRAGEngine"] = None):
         self.active_tasks: Dict[str, TaskData] = {}
         self.task_queue = asyncio.Queue()
         self.max_concurrent_tasks = max_concurrent_tasks
         self.logger = self._setup_logger()
         self._workers_running = False
         self._worker_tasks: List[asyncio.Task] = []
+        self.rag_engine = rag_engine
         
     def _setup_logger(self) -> logging.Logger:
         """配置日志记录器"""
@@ -121,7 +136,7 @@ class TaskManager:
             task_data.status = TaskStatus.PROCESSING
             task_data.start_time = datetime.now()
             task_data.progress = {
-                'total_files': len(task_data.files),
+                'total_files': len(task_data.documents),
                 'processed': 0,
                 'failed': 0,
                 'current_file': None,
@@ -129,8 +144,7 @@ class TaskManager:
             }
             
             # 这里应该调用实际的文档处理逻辑
-            # 暂时使用模拟处理
-            await self._simulate_document_processing(task_data)
+            await self._process_documents(task_data)
             
             # 任务完成
             task_data.status = TaskStatus.COMPLETED
@@ -145,51 +159,119 @@ class TaskManager:
             task_data.error = str(e)
             self.logger.error(f"任务 {task_id} 处理失败: {e}")
     
-    async def _simulate_document_processing(self, task_data: TaskData):
-        """模拟文档处理（稍后替换为真实处理逻辑）"""
-        files = task_data.files
-        total_files = len(files)
-        
-        for i, file_path in enumerate(files):
-            # 模拟处理时间
-            await asyncio.sleep(1)  # 模拟1秒处理时间
-            
-            # 更新进度
-            task_data.progress['processed'] = i + 1
-            task_data.progress['current_file'] = file_path.name
-            task_data.progress['percentage'] = (i + 1) / total_files * 100
-            
-            # 模拟处理结果
-            doc_info = {
-                'document_id': f"doc_{uuid.uuid4().hex[:8]}",
-                'filename': file_path.name,
-                'upload_time': datetime.now(),
-                'file_size': file_path.stat().st_size if file_path.exists() else 0,
-                'status': DocumentStatus.INDEXED,
-                'char_count': 1000,  # 模拟字符数
-                'processing_time': "1s",
-                'error': None
-            }
-            
-            task_data.results.append(doc_info)
+    async def _process_documents(self, task_data: TaskData):
+        """真实的文档处理与索引构建逻辑"""
+        if not self.rag_engine:
+            raise RuntimeError("任务管理器未配置 RAG 引擎，无法处理上传的文档")
+
+        documents = task_data.documents
+        total_files = len(documents)
+        if total_files == 0:
+            return
+
+        tenant_id = task_data.tenant_id or task_data.options.get("tenant_id")
+
+        for index, queued in enumerate(documents):
+            start_time = time.time()
+            task_data.progress['current_file'] = queued.filename
+
+            upload_time = datetime.now()
+            if queued.metadata.get("upload_time"):
+                try:
+                    upload_time = datetime.fromisoformat(str(queued.metadata["upload_time"]))
+                except ValueError:
+                    upload_time = datetime.now()
+
+            file_size = queued.metadata.get("file_size")
+            if file_size is None:
+                try:
+                    file_size = queued.path.stat().st_size
+                except OSError:
+                    file_size = 0
+
+            status = DocumentStatus.INDEXED
+            error_message: Optional[str] = None
+            char_count: Optional[int] = None
+
+            try:
+                if not queued.path.exists():
+                    raise FileNotFoundError(f"文件不存在: {queued.path}")
+
+                file_bytes = queued.path.read_bytes()
+                if not file_bytes:
+                    raise ValueError("文件内容为空")
+
+                documents_from_file = await self.rag_engine.documents_from_uploads(
+                    [{"filename": queued.filename, "data": file_bytes}]
+                )
+                if not documents_from_file:
+                    raise ValueError("未能从文件中提取有效内容")
+
+                document = documents_from_file[0]
+                char_count = len(document.text or "")
+
+                metadata = dict(document.metadata or {})
+                metadata.update(queued.metadata or {})
+                metadata.setdefault("filename", queued.filename)
+                metadata.setdefault("file_path", str(queued.path))
+                metadata.setdefault("file_size", file_size)
+                metadata.setdefault("char_count", char_count)
+                metadata["document_id"] = queued.document_id
+
+                payload = [{
+                    "document_id": queued.document_id,
+                    "filename": queued.filename,
+                    "content": document.text,
+                    "metadata": metadata,
+                }]
+
+                await self.rag_engine.ingest_documents_async(
+                    payload,
+                    reset_existing=False,
+                    tenant_id=tenant_id,
+                )
+
+            except Exception as exc:
+                status = DocumentStatus.FAILED
+                error_message = str(exc)
+                task_data.progress['failed'] += 1
+
+            processing_time = time.time() - start_time
+            task_data.progress['processed'] = index + 1
+            task_data.progress['percentage'] = (
+                (index + 1) / total_files * 100 if total_files else 100
+            )
+
+            task_data.results.append({
+                'document_id': queued.document_id,
+                'filename': queued.filename,
+                'upload_time': upload_time,
+                'file_size': file_size,
+                'status': status,
+                'char_count': char_count,
+                'processing_time': f"{processing_time:.2f}s",
+                'error': error_message
+            })
     
     async def submit_task(self, 
-                         files: List[Path], 
-                         options: Optional[Dict[str, Any]] = None) -> str:
+                         documents: List[QueuedDocument], 
+                         options: Optional[Dict[str, Any]] = None,
+                         tenant_id: Optional[str] = None) -> str:
         """提交文档处理任务"""
         task_id = self._generate_task_id()
         
         task_data = TaskData(
             task_id=task_id,
-            files=files,
+            documents=documents,
             options=options or {},
-            status=TaskStatus.QUEUED
+            status=TaskStatus.QUEUED,
+            tenant_id=tenant_id,
         )
         
         self.active_tasks[task_id] = task_data
         await self.task_queue.put(task_data)
         
-        self.logger.info(f"任务 {task_id} 已提交，包含 {len(files)} 个文件")
+        self.logger.info(f"任务 {task_id} 已提交，包含 {len(documents)} 个文件")
         return task_id
     
     def get_task_status(self, task_id: str) -> Optional[TaskInfo]:
