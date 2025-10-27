@@ -30,7 +30,8 @@ async def lifespan(app: FastAPI):
         persist_dir="storage",
         embedding_model="BAAI/bge-small-zh-v1.5",
         enable_parallel=True,
-        max_workers=4
+        max_workers=4,
+        auto_ingest_local_data=False,
     )
     logging.info(
         "Elasticsearch vector store -> %s (index template: %s)",

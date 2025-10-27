@@ -76,6 +76,7 @@ class KnowledgeService:
         embedding_local_files_only: Optional[bool] = None,
         enable_parallel: bool = True,
         max_workers: int = 2,
+        auto_ingest_local_data: bool = True,
         es_url: Optional[str] = None,
         es_index: str = "kb-documents",
         es_keyword_index: str = "kb-documents-text",
@@ -91,6 +92,7 @@ class KnowledgeService:
         # 性能优化配置
         self.enable_parallel = enable_parallel
         self.max_workers = max_workers
+        self.auto_ingest_local_data = auto_ingest_local_data
         self.cache_dir = self.persist_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1419,10 +1421,18 @@ class KnowledgeService:
             self.logger.warning(f"加载 Elasticsearch 索引失败: {exc}")
             return None
     
-    async def get_or_create_index_async(self, tenant_id: Optional[str] = None) -> VectorStoreIndex:
+    async def get_or_create_index_async(self, tenant_id: Optional[str] = None) -> Optional[VectorStoreIndex]:
         """异步获取或创建索引"""
         index = await self.load_index_async(tenant_id=tenant_id)
         if index is None:
+            if not self.auto_ingest_local_data:
+                self.logger.info(
+                    "已禁用启动时本地数据扫描，跳过自动构建索引；"
+                    "请通过文档接口导入数据后再执行检索。"
+                )
+                runtime = self._get_tenant_runtime(tenant_id)
+                runtime.index = None
+                return None
             index = await self.build_index_async(tenant_id=tenant_id)
         
         runtime = self._get_tenant_runtime(tenant_id)
@@ -1471,7 +1481,7 @@ class KnowledgeService:
             await self.get_or_create_index_async(tenant_id=tenant_id)
             runtime = self._get_tenant_runtime(tenant_id)
         if runtime.index is None:
-            raise RuntimeError("向量索引尚未初始化，无法执行检索")
+            raise RuntimeError("向量索引尚未初始化，请先通过文档管理接口导入或构建索引后再检索。")
 
         loop = asyncio.get_event_loop()
         top_k = 5
