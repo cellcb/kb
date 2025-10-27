@@ -3,6 +3,7 @@ Knowledge service encapsulating RAG ingestion and retrieval logic.
 """
 
 import os
+import sys
 import asyncio
 import logging
 from pathlib import Path
@@ -93,10 +94,25 @@ class KnowledgeService:
         self.cache_dir = self.persist_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+        bundle_models = self._detect_bundled_models()
+        self._bundled_model_root = bundle_models
+
         cache_env = os.getenv("EMBEDDING_CACHE_DIR")
         default_cache = self.persist_dir / "models"
-        self.embedding_cache_dir = Path(embedding_cache_dir or cache_env or default_cache)
-        self.embedding_cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_candidate: Path
+        if bundle_models is not None:
+            cache_candidate = bundle_models
+        else:
+            cache_candidate = Path(embedding_cache_dir or cache_env or default_cache)
+
+        self.embedding_cache_dir = cache_candidate
+        if not self.embedding_cache_dir.exists():
+            try:
+                self.embedding_cache_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                # 目标可能位于只读的打包目录，跳过创建
+                pass
+        os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(self.embedding_cache_dir))
 
         def _coerce_bool(value: Optional[object]) -> Optional[bool]:
             if value is None:
@@ -107,9 +123,14 @@ class KnowledgeService:
 
         env_local_flag = _coerce_bool(os.getenv("EMBEDDING_LOCAL_FILES_ONLY"))
         if embedding_local_files_only is None:
-            self.embedding_local_files_only = env_local_flag if env_local_flag is not None else False
+            default_local = env_local_flag if env_local_flag is not None else False
         else:
-            self.embedding_local_files_only = bool(embedding_local_files_only)
+            default_local = bool(embedding_local_files_only)
+
+        if bundle_models is not None and embedding_local_files_only is None and env_local_flag is None:
+            default_local = True
+
+        self.embedding_local_files_only = default_local
 
         if self.embedding_local_files_only:
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -117,8 +138,12 @@ class KnowledgeService:
             os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
             self.logger.info("已启用 HuggingFace 离线模式 (仅使用本地缓存)")
 
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(self.embedding_cache_dir))
+        os.environ.setdefault("TRANSFORMERS_CACHE", str(self.embedding_cache_dir))
+        os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(self.embedding_cache_dir))
+
         self.logger.info("Embedding 缓存目录: %s", self.embedding_cache_dir)
-        
+
         # 文件处理缓存
         self.file_cache_path = self.cache_dir / "file_cache.json"
         self.file_cache = self._load_file_cache()
@@ -158,6 +183,37 @@ class KnowledgeService:
 
         # 线程池用于并行处理
         self._thread_pool = ThreadPoolExecutor(max_workers=max_workers)
+
+    def _detect_bundled_models(self) -> Optional[Path]:
+        """Return bundled model directory when running from frozen binary."""
+
+        if not getattr(sys, "frozen", False):
+            return None
+
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path.cwd()))
+        candidate = bundle_root / "storage" / "models"
+        if candidate.exists():
+            self.logger.info("Detected bundled embedding models at %s", candidate)
+            return candidate
+        return None
+
+    def _resolve_bundled_model_path(self, model_name: str) -> Optional[Path]:
+        """Resolve a model name to its bundled snapshot directory."""
+
+        if self._bundled_model_root is None:
+            return None
+
+        safe_name = model_name.replace("/", "--")
+        base_dir = self._bundled_model_root / f"models--{safe_name}"
+        snapshot_root = base_dir / "snapshots"
+        if not snapshot_root.exists():
+            return None
+
+        snapshots = sorted(snapshot_root.iterdir())
+        if not snapshots:
+            return None
+
+        return snapshots[0]
 
     def _get_es_kwargs(self) -> Dict[str, Any]:
         """构建 Elasticsearch 连接参数"""
@@ -445,6 +501,11 @@ class KnowledgeService:
         if resolved_model.exists():
             model_name = str(resolved_model.resolve())
             self.logger.info("检测到本地embedding模型目录: %s", model_name)
+        else:
+            bundled_path = self._resolve_bundled_model_path(model_name)
+            if bundled_path is not None:
+                model_name = str(bundled_path)
+                self.logger.info("使用打包embedding模型目录: %s", model_name)
 
         try:
             Settings.embed_model = HuggingFaceEmbedding(
@@ -455,8 +516,14 @@ class KnowledgeService:
         except Exception as e:
             self.logger.error(f"加载embedding模型失败: {e}")
             self.logger.info("尝试使用默认的轻量级模型...")
+            fallback_name = "sentence-transformers/all-MiniLM-L6-v2"
+            bundled_fallback = self._resolve_bundled_model_path(fallback_name)
+            if bundled_fallback is not None:
+                fallback_name = str(bundled_fallback)
+                self.logger.info("使用打包默认模型目录: %s", fallback_name)
+
             Settings.embed_model = HuggingFaceEmbedding(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_name=fallback_name,
                 cache_folder=cache_folder,
             )
     
