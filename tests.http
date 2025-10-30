@@ -1,7 +1,7 @@
 ### RAG 同步查询
 POST http://localhost:8000/api/chat
 Content-Type: application/json
-X-Tenant-ID: demo-tenant
+X-Tenant-ID: 2
 
 {
   "message": "程波有机器学习的经验吗？",
@@ -15,7 +15,7 @@ X-Tenant-ID: demo-tenant
 POST http://localhost:8000/api/chat/stream
 Content-Type: application/json
 Accept: text/event-stream
-X-Tenant-ID: demo-tenant
+X-Tenant-ID: 3
 
 {
   "message": "狮民肋板水池有什么问题",
@@ -28,7 +28,7 @@ X-Tenant-ID: demo-tenant
 ### Elasticsearch 关键字查询
 POST http://localhost:8000/api/search
 Content-Type: application/json
-X-Tenant-ID: demo-tenant
+X-Tenant-ID: 2
 
 {
   "message": "水池",
@@ -61,7 +61,7 @@ X-Tenant-ID: demo-tenant
 ### 上传文件摄取 (请替换文件路径)
 POST http://localhost:8000/api/documents/ingest/upload
 Content-Type: multipart/form-data; boundary=BOUNDARY
-X-Tenant-ID: demo-tenant
+X-Tenant-ID: 3
 
 --BOUNDARY
 Content-Disposition: form-data; name="files"; filename="/Users/cell/Downloads/狮民肋板水池0915_t3-模型2.docx"
@@ -72,5 +72,29 @@ Content-Type: text/plain
 Content-Disposition: form-data; name="metadata"
 Content-Type: application/json
 
-{"/Users/cell/Downloads/狮民肋板水池0915_t3-模型2.docx": {"source": "http-client"}}
+{"/Users/cell/Downloads/狮民肋板水池0915_t3-模型2.docx": {"source": "http-client", "document_id": "123456"}}
+--BOUNDARY--
+
+### 异步上传文档并指定回调 (请替换文件路径与回调地址)
+POST http://localhost:8000/api/documents/upload
+Content-Type: multipart/form-data; boundary=BOUNDARY
+X-Tenant-ID: demo-tenant
+
+--BOUNDARY
+Content-Disposition: form-data; name="files"; filename="/path/to/sample.pdf"
+Content-Type: application/pdf
+
+< /path/to/sample.pdf
+--BOUNDARY
+Content-Disposition: form-data; name="parallel_workers"
+
+4
+--BOUNDARY
+Content-Disposition: form-data; name="document_ids"
+
+{"sample.pdf": "doc_async_sample"}
+--BOUNDARY
+Content-Disposition: form-data; name="callback_url"
+
+https://example.com/hooks/index-finished
 --BOUNDARY--

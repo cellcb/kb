@@ -2,32 +2,36 @@
 Knowledge service encapsulating RAG ingestion and retrieval logic.
 """
 
-import os
-import sys
 import asyncio
-import logging
-from pathlib import Path
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Callable, Set
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+import logging
+import os
+import re
+import sys
 import tempfile
 import time
-import re
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set
 
-import pypdf
 import pdfplumber
+import pypdf
 from docx import Document as DocxDocument
 
 # 可选的文件类型检测
 try:
     import magic
+
     MAGIC_AVAILABLE = True
 except (ImportError, OSError):
     MAGIC_AVAILABLE = False
 
+from elasticsearch import Elasticsearch
+from elasticsearch.exceptions import NotFoundError
+from elasticsearch.helpers import bulk
 from llama_index.core import (
     Document,
     Settings,
@@ -38,14 +42,12 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.openai_like import OpenAILike
 
-from elasticsearch import Elasticsearch
-from elasticsearch.helpers import bulk
-from elasticsearch.exceptions import NotFoundError
-
 try:
     from llama_index.vector_stores.elasticsearch import ElasticsearchVectorStore
 except ImportError:  # pragma: no cover - fallback for older LlamaIndex versions
-    from llama_index.vector_stores.elasticsearch import ElasticsearchStore as ElasticsearchVectorStore
+    from llama_index.vector_stores.elasticsearch import (
+        ElasticsearchStore as ElasticsearchVectorStore,
+    )
 
 
 @dataclass
@@ -66,7 +68,7 @@ class TenantRuntime:
 
 class KnowledgeService:
     """异步 RAG 知识服务，提供检索与索引能力供 API / Agent 使用。"""
-    
+
     def __init__(
         self,
         data_dir: str = "data",
@@ -88,7 +90,7 @@ class KnowledgeService:
         self.data_dir = Path(data_dir)
         self.persist_dir = Path(persist_dir)
         self.logger = self._setup_logger()
-        
+
         # 性能优化配置
         self.enable_parallel = enable_parallel
         self.max_workers = max_workers
@@ -129,7 +131,11 @@ class KnowledgeService:
         else:
             default_local = bool(embedding_local_files_only)
 
-        if bundle_models is not None and embedding_local_files_only is None and env_local_flag is None:
+        if (
+            bundle_models is not None
+            and embedding_local_files_only is None
+            and env_local_flag is None
+        ):
             default_local = True
 
         self.embedding_local_files_only = default_local
@@ -150,20 +156,20 @@ class KnowledgeService:
         self.file_cache_path = self.cache_dir / "file_cache.json"
         self.file_cache = self._load_file_cache()
         self.es_client = None
-        
+
         # 配置LlamaIndex设置 - 使用自定义DeepSeek LLM
         Settings.llm = OpenAILike(
             model="deepseek-v3-250324",
             api_key="155d5cb5-6b83-4d52-8be8-eb795c72ad44",
             api_base="https://ark.cn-beijing.volces.com/api/v3",
             is_chat_model=True,
-            temperature=0.1
+            temperature=0.1,
         )
-        
+
         # 使用本地embedding模型
         self._setup_embedding_model(embedding_model)
         Settings.node_parser = SentenceSplitter(chunk_size=1024, chunk_overlap=20)
-        
+
         # Elasticsearch 相关配置
         self.es_url = es_url or os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
         self.es_index_template = os.getenv("ELASTICSEARCH_INDEX", es_index)
@@ -439,7 +445,10 @@ class KnowledgeService:
                         "position": {"type": "integer"},
                         "char_count": {"type": "integer"},
                         "metadata": {"type": "object", "enabled": False},
-                        "created_at": {"type": "date", "format": "strict_date_optional_time||epoch_millis"},
+                        "created_at": {
+                            "type": "date",
+                            "format": "strict_date_optional_time||epoch_millis",
+                        },
                     }
                 }
             }
@@ -470,21 +479,19 @@ class KnowledgeService:
         """配置日志记录器"""
         logger = logging.getLogger(f"{__name__}.KnowledgeService")
         logger.setLevel(logging.INFO)
-        
+
         if not logger.handlers:
             handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
+            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
             handler.setFormatter(formatter)
             logger.addHandler(handler)
-            
+
         return logger
-        
+
     def _setup_embedding_model(self, model_name: str):
         """配置embedding模型"""
         self.logger.info(f"正在加载embedding模型: {model_name}")
-        
+
         # 预定义的模型映射
         model_info = {
             "BAAI/bge-small-zh-v1.5": "BGE小型中文模型 (推荐中文使用)",
@@ -493,10 +500,10 @@ class KnowledgeService:
             "sentence-transformers/all-mpnet-base-v2": "高质量英文模型",
             "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": "多语言模型",
         }
-        
+
         if model_name in model_info:
             self.logger.info(f"使用模型: {model_info[model_name]}")
-        
+
         cache_folder = str(self.embedding_cache_dir)
 
         resolved_model = Path(model_name)
@@ -528,8 +535,10 @@ class KnowledgeService:
                 model_name=fallback_name,
                 cache_folder=cache_folder,
             )
-    
-    def _init_vector_store(self, tenant_id: Optional[str] = None, force: bool = False) -> TenantRuntime:
+
+    def _init_vector_store(
+        self, tenant_id: Optional[str] = None, force: bool = False
+    ) -> TenantRuntime:
         """初始化或重建 Elasticsearch 向量存储"""
         runtime = self._get_tenant_runtime(tenant_id)
 
@@ -546,7 +555,9 @@ class KnowledgeService:
                 es_password=self.es_password,
                 es_api_key=self.es_api_key,
             )
-            runtime.storage_context = StorageContext.from_defaults(vector_store=runtime.vector_store)
+            runtime.storage_context = StorageContext.from_defaults(
+                vector_store=runtime.vector_store
+            )
             self._ensure_alias(runtime.vector_index, runtime.vector_alias)
             self.logger.info(
                 "Elasticsearch 向量索引已准备: %s",
@@ -556,18 +567,18 @@ class KnowledgeService:
             self.logger.error(f"初始化 Elasticsearch 向量存储失败: {exc}")
             raise
         return runtime
-    
+
     def _ensure_vector_store(self, tenant_id: Optional[str] = None) -> TenantRuntime:
         """确保向量存储已初始化"""
         runtime = self._get_tenant_runtime(tenant_id)
         if runtime.vector_store is None or runtime.storage_context is None:
             runtime = self._init_vector_store(tenant_id=tenant_id)
         return runtime
-    
+
     def _reset_vector_index(self, tenant_id: Optional[str] = None):
         """删除并重建 Elasticsearch 索引"""
         runtime = self._ensure_vector_store(tenant_id=tenant_id)
-        
+
         try:
             delete_method = getattr(runtime.vector_store, "delete_index", None)
             if callable(delete_method):
@@ -587,7 +598,7 @@ class KnowledgeService:
         finally:
             new_runtime = self._init_vector_store(tenant_id=tenant_id, force=True)
             self._ensure_alias(new_runtime.vector_index, new_runtime.vector_alias)
-    
+
     def _refresh_vector_index(self, tenant_id: Optional[str] = None):
         """刷新 Elasticsearch 索引以便查询"""
         if not self.es_client:
@@ -598,25 +609,25 @@ class KnowledgeService:
             self._ensure_alias(runtime.vector_index, runtime.vector_alias)
         except Exception as exc:
             self.logger.warning(f"刷新 Elasticsearch 索引失败: {exc}")
-    
+
     def _load_file_cache(self) -> Dict[str, Any]:
         """加载文件处理缓存"""
         try:
             if self.file_cache_path.exists():
-                with open(self.file_cache_path, 'r', encoding='utf-8') as f:
+                with open(self.file_cache_path, "r", encoding="utf-8") as f:
                     return json.load(f)
         except Exception as e:
             self.logger.warning(f"缓存加载失败: {e}")
         return {}
-    
+
     def _save_file_cache(self):
         """保存文件处理缓存"""
         try:
-            with open(self.file_cache_path, 'w', encoding='utf-8') as f:
+            with open(self.file_cache_path, "w", encoding="utf-8") as f:
                 json.dump(self.file_cache, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.logger.warning(f"缓存保存失败: {e}")
-    
+
     def _get_file_hash(self, file_path: Path) -> str:
         """计算文件的哈希值用于缓存判断"""
         try:
@@ -625,62 +636,62 @@ class KnowledgeService:
             return hashlib.md5(content.encode()).hexdigest()
         except Exception:
             return ""
-    
+
     def _is_file_cached(self, file_path: Path) -> bool:
         """检查文件是否已被缓存且未过期"""
         file_hash = self._get_file_hash(file_path)
         if not file_hash:
             return False
-        
+
         cache_key = str(file_path)
         if cache_key in self.file_cache:
             cached_info = self.file_cache[cache_key]
-            return cached_info.get('hash') == file_hash
+            return cached_info.get("hash") == file_hash
         return False
-    
+
     def _get_cached_content(self, file_path: Path) -> Optional[str]:
         """获取缓存的文件内容"""
         cache_key = str(file_path)
         if cache_key in self.file_cache:
-            return self.file_cache[cache_key].get('content')
+            return self.file_cache[cache_key].get("content")
         return None
-    
+
     def _cache_file_content(self, file_path: Path, content: str):
         """缓存文件内容"""
         file_hash = self._get_file_hash(file_path)
         if file_hash:
             cache_key = str(file_path)
             self.file_cache[cache_key] = {
-                'hash': file_hash,
-                'content': content,
-                'timestamp': time.time(),
-                'char_count': len(content)
+                "hash": file_hash,
+                "content": content,
+                "timestamp": time.time(),
+                "char_count": len(content),
             }
-    
+
     def _detect_file_type(self, file_path: Path) -> str:
         """检测文件的真实类型"""
         if MAGIC_AVAILABLE:
             try:
                 mime_type = magic.from_file(str(file_path), mime=True)
-                if mime_type == 'application/pdf':
-                    return 'pdf'
+                if mime_type == "application/pdf":
+                    return "pdf"
                 elif mime_type in {
-                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                    'application/msword',
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/msword",
                 }:
-                    return 'docx'
-                elif mime_type.startswith('text/'):
-                    return 'txt'
+                    return "docx"
+                elif mime_type.startswith("text/"):
+                    return "txt"
                 else:
-                    return file_path.suffix.lower().lstrip('.')
+                    return file_path.suffix.lower().lstrip(".")
             except Exception:
-                return file_path.suffix.lower().lstrip('.')
+                return file_path.suffix.lower().lstrip(".")
         else:
-            suffix = file_path.suffix.lower().lstrip('.')
-            if suffix in {'docx', 'doc'}:
-                return 'docx'
+            suffix = file_path.suffix.lower().lstrip(".")
+            if suffix in {"docx", "doc"}:
+                return "docx"
             return suffix
-    
+
     def _extract_pdf_content(self, file_path: Path) -> Optional[str]:
         """从PDF文件提取文本内容"""
         # 首先检查缓存
@@ -689,35 +700,37 @@ class KnowledgeService:
             if cached_content:
                 self.logger.info(f"使用缓存内容: {file_path.name} ({len(cached_content)} 字符)")
                 return cached_content
-        
+
         # 检查文件大小和基本有效性
         try:
             file_size = file_path.stat().st_size
             if file_size == 0:
                 self.logger.warning(f"跳过空文件: {file_path.name}")
                 return None
-                
+
             if file_size > 50 * 1024 * 1024:  # 50MB
-                self.logger.warning(f"大文件 {file_path.name} ({file_size / 1024 / 1024:.1f}MB)，处理可能较慢")
-                
+                self.logger.warning(
+                    f"大文件 {file_path.name} ({file_size / 1024 / 1024:.1f}MB)，处理可能较慢"
+                )
+
         except OSError as e:
             self.logger.error(f"无法访问文件 {file_path.name}: {e}")
             return None
-        
+
         try:
             # 首先尝试使用pypdf
             self.logger.info(f"使用pypdf提取 {file_path.name}")
             text = self._extract_with_pypdf(file_path)
-            
+
             if text and text.strip():
                 self.logger.info(f"pypdf成功提取 {len(text)} 字符")
                 self._cache_file_content(file_path, text)
                 return text
-            
+
             # 如果pypdf失败，尝试pdfplumber
             self.logger.warning(f"pypdf提取结果为空，尝试pdfplumber: {file_path.name}")
             text = self._extract_with_pdfplumber(file_path)
-            
+
             if text and text.strip():
                 self.logger.info(f"pdfplumber成功提取 {len(text)} 字符")
                 self._cache_file_content(file_path, text)
@@ -725,7 +738,7 @@ class KnowledgeService:
             else:
                 self.logger.warning(f"PDF文件 {file_path.name} 可能是扫描版或损坏")
                 return None
-            
+
         except Exception as e:
             error_type = type(e).__name__
             self.logger.error(f"PDF提取失败 {file_path.name} ({error_type}): {str(e)[:100]}")
@@ -761,20 +774,20 @@ class KnowledgeService:
 
         self.logger.warning(f"DOCX文件 {file_path.name} 未提取到有效文本")
         return None
-    
+
     def _extract_with_pypdf(self, file_path: Path) -> str:
         """使用pypdf提取PDF文本"""
         text = ""
-        
+
         try:
-            with open(file_path, 'rb') as file:
+            with open(file_path, "rb") as file:
                 pdf_reader = pypdf.PdfReader(file)
                 total_pages = len(pdf_reader.pages)
-                
+
                 if total_pages == 0:
                     self.logger.warning(f"PDF文件 {file_path.name} 没有页面")
                     return ""
-                
+
                 for page_num, page in enumerate(pdf_reader.pages):
                     try:
                         page_text = page.extract_text()
@@ -783,24 +796,24 @@ class KnowledgeService:
                     except Exception as e:
                         self.logger.warning(f"跳过第{page_num + 1}页: {str(e)[:50]}")
                         continue
-                        
+
         except Exception as e:
             raise Exception(f"pypdf读取失败: {e}")
-            
+
         return text.strip()
-    
+
     def _extract_with_pdfplumber(self, file_path: Path) -> str:
         """使用pdfplumber提取PDF文本"""
         text = ""
-        
+
         try:
             with pdfplumber.open(file_path) as pdf:
                 total_pages = len(pdf.pages)
-                
+
                 if total_pages == 0:
                     self.logger.warning(f"PDF文件 {file_path.name} 没有页面")
                     return ""
-                
+
                 for page_num, page in enumerate(pdf.pages):
                     try:
                         page_text = page.extract_text()
@@ -809,32 +822,32 @@ class KnowledgeService:
                     except Exception as e:
                         self.logger.warning(f"跳过第{page_num + 1}页: {str(e)[:50]}")
                         continue
-                        
+
         except Exception as e:
             raise Exception(f"pdfplumber处理失败: {e}")
-            
+
         return text.strip()
-    
+
     def _process_single_file(self, file_path: Path) -> Optional[Document]:
         """处理单个文件，返回Document对象或None"""
         detected_type = self._detect_file_type(file_path)
-        
+
         try:
-            if detected_type == 'pdf':
+            if detected_type == "pdf":
                 content = self._extract_pdf_content(file_path)
                 if content:
                     return Document(
-                        text=content, 
+                        text=content,
                         metadata={
                             "filename": file_path.name,
                             "file_type": "pdf",
                             "file_path": str(file_path),
                             "file_size": file_path.stat().st_size,
-                            "char_count": len(content)
-                        }
+                            "char_count": len(content),
+                        },
                     )
-                    
-            elif detected_type == 'docx':
+
+            elif detected_type == "docx":
                 content = self._extract_docx_content(file_path)
                 if content:
                     return Document(
@@ -848,55 +861,49 @@ class KnowledgeService:
                         },
                     )
 
-            elif detected_type == 'txt':
+            elif detected_type == "txt":
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
                         if content.strip():
                             return Document(
-                                text=content, 
+                                text=content,
                                 metadata={
                                     "filename": file_path.name,
                                     "file_type": "txt",
                                     "file_path": str(file_path),
                                     "file_size": file_path.stat().st_size,
-                                    "char_count": len(content)
-                                }
+                                    "char_count": len(content),
+                                },
                             )
                 except UnicodeDecodeError:
                     self.logger.warning(f"文本文件编码错误，跳过: {file_path.name}")
-                    
+
         except Exception as e:
             self.logger.error(f"处理文件失败 {file_path.name}: {str(e)[:100]}")
-        
+
         return None
-    
-    async def process_documents_async(self, 
-                                    files: List[Path], 
-                                    progress_callback: Optional[Callable] = None) -> List[Document]:
+
+    async def process_documents_async(
+        self, files: List[Path], progress_callback: Optional[Callable] = None
+    ) -> List[Document]:
         """异步处理文档列表"""
         documents = []
-        stats = {
-            'processed': 0,
-            'failed': 0,
-            'total_chars': 0,
-            'pdf_files': 0,
-            'txt_files': 0
-        }
-        
+        stats = {"processed": 0, "failed": 0, "total_chars": 0, "pdf_files": 0, "txt_files": 0}
+
         start_time = time.time()
-        
+
         if self.enable_parallel and len(files) > 1:
             documents = await self._process_files_parallel_async(files, stats, progress_callback)
         else:
             documents = await self._process_files_sequential_async(files, stats, progress_callback)
-        
+
         # 保存缓存
         self._save_file_cache()
-        
+
         processing_time = time.time() - start_time
         self.logger.info(f"处理完成: {stats['processed']} 个文档, 用时 {processing_time:.2f}秒")
-        
+
         return documents
 
     def _create_nodes(self, documents: List[Document]):
@@ -941,8 +948,13 @@ class KnowledgeService:
             doc = self._process_single_file(temp_path)
             if doc:
                 metadata = dict(doc.metadata or {})
-                metadata.setdefault("filename", filename or temp_path.name)
-                metadata["file_path"] = f"upload://{filename}" if filename else metadata.get("file_path")
+                if filename:
+                    metadata["filename"] = filename
+                else:
+                    metadata.setdefault("filename", temp_path.name)
+                metadata["file_path"] = (
+                    f"upload://{filename}" if filename else metadata.get("file_path")
+                )
                 metadata.setdefault("file_size", len(data))
                 metadata.setdefault("char_count", len(doc.text))
                 doc.metadata = metadata
@@ -996,22 +1008,35 @@ class KnowledgeService:
                 continue
 
             metadata = getattr(node, "metadata", {}) or {}
+            raw_document_id = (
+                metadata.get("document_id")
+                or metadata.get("doc_id")
+                or metadata.get("ref_doc_id")
+                or getattr(node, "ref_doc_id", None)
+            )
+            document_id = str(raw_document_id).strip() if raw_document_id else None
             document_key = (
-                metadata.get("file_path")
+                document_id
+                or metadata.get("file_path")
                 or metadata.get("filename")
                 or getattr(node, "ref_doc_id", None)
                 or "unknown_document"
             )
-            doc_hash = hashlib.md5(document_key.encode("utf-8")).hexdigest()
-            position = chunk_counters.get(doc_hash, 0)
-            chunk_counters[doc_hash] = position + 1
+            identifier = str(document_key)
+            doc_hash = hashlib.md5(identifier.encode("utf-8")).hexdigest()
+            position = chunk_counters.get(identifier, 0)
+            chunk_counters[identifier] = position + 1
             chunk_id = f"{doc_hash}-{position}"
+
+            if document_id:
+                metadata = dict(metadata)
+                metadata.setdefault("document_id", document_id)
 
             action = {
                 "_op_type": "index",
                 "_index": runtime.keyword_index,
                 "_id": chunk_id,
-                "document_id": doc_hash,
+                "document_id": document_id or doc_hash,
                 "chunk_id": chunk_id,
                 "filename": metadata.get("filename"),
                 "file_path": metadata.get("file_path"),
@@ -1048,104 +1073,100 @@ class KnowledgeService:
             raise
         return len(actions)
 
-    async def _process_files_parallel_async(self, 
-                                          files: List[Path], 
-                                          stats: Dict[str, int],
-                                          progress_callback: Optional[Callable] = None) -> List[Document]:
+    async def _process_files_parallel_async(
+        self, files: List[Path], stats: Dict[str, int], progress_callback: Optional[Callable] = None
+    ) -> List[Document]:
         """异步并行处理文件"""
         documents = []
-        
+
         self.logger.info(f"使用并行处理 (最大 {self.max_workers} 个工作线程)")
-        
+
         loop = asyncio.get_event_loop()
-        
+
         # 创建任务
         tasks = []
         for file_path in files:
-            task = loop.run_in_executor(
-                self._thread_pool, 
-                self._process_single_file, 
-                file_path
-            )
+            task = loop.run_in_executor(self._thread_pool, self._process_single_file, file_path)
             tasks.append((task, file_path))
-        
+
         # 收集结果
         for task, file_path in tasks:
             try:
                 doc = await task
                 if doc:
                     documents.append(doc)
-                    file_type = doc.metadata.get('file_type', 'unknown')
-                    if file_type == 'pdf':
-                        stats['pdf_files'] += 1
-                    elif file_type == 'txt':
-                        stats['txt_files'] += 1
-                    
-                    stats['processed'] += 1
-                    stats['total_chars'] += doc.metadata.get('char_count', 0)
+                    file_type = doc.metadata.get("file_type", "unknown")
+                    if file_type == "pdf":
+                        stats["pdf_files"] += 1
+                    elif file_type == "txt":
+                        stats["txt_files"] += 1
+
+                    stats["processed"] += 1
+                    stats["total_chars"] += doc.metadata.get("char_count", 0)
                 else:
-                    stats['failed'] += 1
-                
+                    stats["failed"] += 1
+
                 # 调用进度回调
                 if progress_callback:
-                    await progress_callback({
-                        'file': file_path.name,
-                        'status': 'completed' if doc else 'failed',
-                        'processed': stats['processed'],
-                        'total': len(files)
-                    })
-                    
+                    await progress_callback(
+                        {
+                            "file": file_path.name,
+                            "status": "completed" if doc else "failed",
+                            "processed": stats["processed"],
+                            "total": len(files),
+                        }
+                    )
+
             except Exception as e:
                 self.logger.error(f"并行处理失败 {file_path.name}: {e}")
-                stats['failed'] += 1
-        
+                stats["failed"] += 1
+
         return documents
-    
-    async def _process_files_sequential_async(self, 
-                                            files: List[Path], 
-                                            stats: Dict[str, int],
-                                            progress_callback: Optional[Callable] = None) -> List[Document]:
+
+    async def _process_files_sequential_async(
+        self, files: List[Path], stats: Dict[str, int], progress_callback: Optional[Callable] = None
+    ) -> List[Document]:
         """异步串行处理文件"""
         documents = []
-        
+
         loop = asyncio.get_event_loop()
-        
+
         for file_path in files:
             try:
                 doc = await loop.run_in_executor(
-                    self._thread_pool, 
-                    self._process_single_file, 
-                    file_path
+                    self._thread_pool, self._process_single_file, file_path
                 )
-                
+
                 if doc:
                     documents.append(doc)
-                    file_type = doc.metadata.get('file_type', 'unknown')
-                    if file_type == 'pdf':
-                        stats['pdf_files'] += 1
-                    elif file_type == 'txt':
-                        stats['txt_files'] += 1
-                    
-                    stats['processed'] += 1
-                    stats['total_chars'] += doc.metadata.get('char_count', 0)
+                    file_type = doc.metadata.get("file_type", "unknown")
+                    if file_type == "pdf":
+                        stats["pdf_files"] += 1
+                    elif file_type == "txt":
+                        stats["txt_files"] += 1
+
+                    stats["processed"] += 1
+                    stats["total_chars"] += doc.metadata.get("char_count", 0)
                 else:
-                    stats['failed'] += 1
-                
+                    stats["failed"] += 1
+
                 # 调用进度回调
                 if progress_callback:
-                    await progress_callback({
-                        'file': file_path.name,
-                        'status': 'completed' if doc else 'failed',
-                        'processed': stats['processed'],
-                        'total': len(files)
-                    })
-                    
+                    await progress_callback(
+                        {
+                            "file": file_path.name,
+                            "status": "completed" if doc else "failed",
+                            "processed": stats["processed"],
+                            "total": len(files),
+                        }
+                    )
+
             except Exception as e:
                 self.logger.error(f"处理文件失败 {file_path.name}: {e}")
-                stats['failed'] += 1
-        
+                stats["failed"] += 1
+
         return documents
-    
+
     async def build_index_async(
         self,
         documents: Optional[List[Document]] = None,
@@ -1155,12 +1176,12 @@ class KnowledgeService:
         """异步构建向量索引（写入 Elasticsearch）"""
         self.logger.info("构建向量索引（Elasticsearch）...")
         runtime = self._ensure_vector_store(tenant_id=tenant_id)
-        
+
         if documents is None:
             # 加载数据目录中的文档
             all_files = [f for f in self.data_dir.iterdir() if f.is_file()]
             documents = await self.process_documents_async(all_files)
-        
+
         if not documents:
             raise ValueError("没有找到要索引的文档")
 
@@ -1179,12 +1200,14 @@ class KnowledgeService:
 
         index = await loop.run_in_executor(None, _build)
         await loop.run_in_executor(None, lambda: self._refresh_vector_index(tenant_id))
-        await loop.run_in_executor(None, lambda: self._index_keyword_nodes(nodes, tenant_id=tenant_id))
+        await loop.run_in_executor(
+            None, lambda: self._index_keyword_nodes(nodes, tenant_id=tenant_id)
+        )
 
         self.logger.info("Elasticsearch 向量索引构建完成")
         runtime.index = index
         return index
-    
+
     async def ingest_documents_async(
         self,
         documents: List[Dict[str, Any]],
@@ -1203,7 +1226,8 @@ class KnowledgeService:
         document_ids_for_refresh: Set[str] = set()
 
         for item in documents:
-            document_id = item.get("document_id") or item.get("id")
+            document_id_raw = item.get("document_id") or item.get("id")
+            document_id = str(document_id_raw).strip() if document_id_raw else ""
             if not document_id:
                 self.logger.warning("跳过缺少 document_id 的文档: %s", item)
                 continue
@@ -1227,7 +1251,18 @@ class KnowledgeService:
                     chunk_metadata.update(chunk.get("metadata") or {})
                     chunk_metadata["chunk_index"] = idx
                     chunk_metadata["char_count"] = len(text)
-                    doc_objects.append(Document(text=text, metadata=chunk_metadata))
+                    try:
+                        doc = Document(
+                            text=text,
+                            metadata=chunk_metadata,
+                            doc_id=str(document_id),
+                        )
+                    except TypeError:
+                        doc = Document(text=text, metadata=chunk_metadata)
+                        setattr(doc, "doc_id", str(document_id))
+                        if hasattr(doc, "id_"):
+                            setattr(doc, "id_", str(document_id))
+                    doc_objects.append(doc)
                     raw_chunks += 1
                     produced_chunks += 1
             else:
@@ -1237,7 +1272,18 @@ class KnowledgeService:
                 chunk_metadata = base_metadata.copy()
                 chunk_metadata["chunk_index"] = 0
                 chunk_metadata["char_count"] = len(text)
-                doc_objects.append(Document(text=text, metadata=chunk_metadata))
+                try:
+                    doc = Document(
+                        text=text,
+                        metadata=chunk_metadata,
+                        doc_id=str(document_id),
+                    )
+                except TypeError:
+                    doc = Document(text=text, metadata=chunk_metadata)
+                    setattr(doc, "doc_id", str(document_id))
+                    if hasattr(doc, "id_"):
+                        setattr(doc, "id_", str(document_id))
+                doc_objects.append(doc)
                 raw_chunks += 1
                 produced_chunks += 1
 
@@ -1248,6 +1294,7 @@ class KnowledgeService:
             raise ValueError("没有可供索引的文档内容")
 
         if document_ids_for_refresh:
+
             def _delete_existing(doc_id: str):
                 self._delete_document_entries(doc_id, tenant_id=tenant_id)
 
@@ -1269,6 +1316,7 @@ class KnowledgeService:
                 runtime.index = existing_index
 
         if runtime.index is None:
+
             def _build_nodes() -> VectorStoreIndex:
                 return self._vector_index_from_nodes(runtime, nodes)
 
@@ -1387,12 +1435,12 @@ class KnowledgeService:
             None,
             lambda: self._delete_document_entries(cleaned_id, tenant_id=tenant_id),
         )
-    
+
     async def load_index_async(self, tenant_id: Optional[str] = None) -> Optional[VectorStoreIndex]:
         """异步加载已存在的 Elasticsearch 索引"""
         runtime = self._ensure_vector_store(tenant_id=tenant_id)
         loop = asyncio.get_event_loop()
-        
+
         try:
             index_exists = await loop.run_in_executor(
                 None,
@@ -1401,14 +1449,14 @@ class KnowledgeService:
         except Exception as exc:
             self.logger.warning(f"检测 Elasticsearch 索引失败: {exc}")
             return None
-        
+
         if not index_exists:
             self.logger.info("Elasticsearch 索引不存在，需要重新构建")
             return None
-        
+
         def _load() -> VectorStoreIndex:
             return self._vector_index_from_store(runtime)
-        
+
         try:
             index = await loop.run_in_executor(None, _load)
             runtime.index = index
@@ -1420,8 +1468,10 @@ class KnowledgeService:
         except Exception as exc:
             self.logger.warning(f"加载 Elasticsearch 索引失败: {exc}")
             return None
-    
-    async def get_or_create_index_async(self, tenant_id: Optional[str] = None) -> Optional[VectorStoreIndex]:
+
+    async def get_or_create_index_async(
+        self, tenant_id: Optional[str] = None
+    ) -> Optional[VectorStoreIndex]:
         """异步获取或创建索引"""
         index = await self.load_index_async(tenant_id=tenant_id)
         if index is None:
@@ -1434,11 +1484,11 @@ class KnowledgeService:
                 runtime.index = None
                 return None
             index = await self.build_index_async(tenant_id=tenant_id)
-        
+
         runtime = self._get_tenant_runtime(tenant_id)
         runtime.index = index
         return index
-    
+
     async def query_async(
         self,
         question: str,
@@ -1577,15 +1627,26 @@ class KnowledgeService:
             source_doc = hit.get("_source", {})
             highlight = hit.get("highlight", {})
             highlight_fragments = highlight.get("text", [])
-            preview_text = highlight_fragments[0] if highlight_fragments else source_doc.get("text", "")
+            preview_text = (
+                highlight_fragments[0] if highlight_fragments else source_doc.get("text", "")
+            )
             preview_text = (preview_text or "").strip()
             if len(preview_text) > 120:
                 preview_text = preview_text[:120] + "..."
+
+            source_metadata = source_doc.get("metadata") or {}
+            document_id = (
+                source_doc.get("document_id")
+                or source_metadata.get("document_id")
+                or source_metadata.get("doc_id")
+                or source_metadata.get("ref_doc_id")
+            )
 
             sources.append(
                 {
                     "filename": source_doc.get("filename", "未知文档"),
                     "content_preview": preview_text,
+                    "document_id": document_id,
                     "score": score,
                 }
             )
@@ -1593,8 +1654,7 @@ class KnowledgeService:
 
         if answer_fragments:
             answer = "\n".join(
-                f"{idx + 1}. {fragment}"
-                for idx, fragment in enumerate(answer_fragments)
+                f"{idx + 1}. {fragment}" for idx, fragment in enumerate(answer_fragments)
             )
         else:
             answer = "未找到相关内容。"
@@ -1624,7 +1684,21 @@ class KnowledgeService:
                 if text is None and hasattr(base_node, "get_content"):
                     text = base_node.get_content(metadata_mode="none")
 
+                # 如果元数据未携带 document_id，则再从节点引用中兜底
+                node_ref_id = getattr(base_node, "ref_doc_id", None) or getattr(
+                    base_node, "doc_id", None
+                )
+            else:
+                node_ref_id = getattr(node_with_score, "ref_doc_id", None)
+
             metadata = metadata or {}
+            document_id = (
+                metadata.get("document_id")
+                or metadata.get("doc_id")
+                or metadata.get("ref_doc_id")
+                or node_ref_id
+            )
+
             text = (text or "").strip()
 
             if len(text) > 100:
@@ -1636,35 +1710,36 @@ class KnowledgeService:
                 {
                     "filename": metadata.get("filename", "未知文档"),
                     "content_preview": preview,
+                    "document_id": document_id,
                     "score": score,
                 }
             )
 
         return sources
-    
+
     def get_status(self) -> Dict[str, Any]:
         """获取系统状态信息"""
         runtime = self._get_tenant_runtime(None)
         return {
-            'index_ready': runtime.index is not None,
-            'data_dir': str(self.data_dir),
-            'persist_dir': str(self.persist_dir),
-            'parallel_enabled': self.enable_parallel,
-            'max_workers': self.max_workers,
-            'cached_files': len(self.file_cache),
-            'vector_store': 'elasticsearch',
-            'elasticsearch_url': self.es_url,
-            'elasticsearch_index': runtime.vector_index,
-            'keyword_index': runtime.keyword_index,
-            'text_analyzer': self.es_text_analyzer,
-            'keyword_index_initialized': runtime.keyword_index_checked,
+            "index_ready": runtime.index is not None,
+            "data_dir": str(self.data_dir),
+            "persist_dir": str(self.persist_dir),
+            "parallel_enabled": self.enable_parallel,
+            "max_workers": self.max_workers,
+            "cached_files": len(self.file_cache),
+            "vector_store": "elasticsearch",
+            "elasticsearch_url": self.es_url,
+            "elasticsearch_index": runtime.vector_index,
+            "keyword_index": runtime.keyword_index,
+            "text_analyzer": self.es_text_analyzer,
+            "keyword_index_initialized": runtime.keyword_index_checked,
         }
 
     def has_index(self, tenant_id: Optional[str] = None) -> bool:
         """检查指定租户的向量索引是否已初始化"""
         return self._get_tenant_runtime(tenant_id).index is not None
-    
+
     def __del__(self):
         """清理资源"""
-        if hasattr(self, '_thread_pool'):
+        if hasattr(self, "_thread_pool"):
             self._thread_pool.shutdown(wait=False)

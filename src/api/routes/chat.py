@@ -9,9 +9,8 @@ from typing import AsyncGenerator, Dict, Iterable, List
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..models.chat import ChatRequest, ChatResponse, SourceInfo
 from ..dependencies import get_conversation_service, get_tenant_id
-
+from ..models.chat import ChatRequest, ChatResponse, SourceInfo
 
 router = APIRouter()
 
@@ -22,6 +21,7 @@ def _format_sources(raw_sources: Iterable[Dict[str, object]]) -> List[SourceInfo
         SourceInfo(
             filename=source.get("filename", "未知文档"),
             content_preview=source.get("content_preview", ""),
+            document_id=source.get("document_id"),
             score=source.get("score"),
         )
         for source in raw_sources or []
@@ -92,11 +92,13 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
             sources = list(_format_sources(result.get("sources", [])))
 
             for chunk in _iter_answer_chunks(answer):
-                yield _sse_payload({
-                    "type": "answer",
-                    "session_id": session_id,
-                    "content": chunk,
-                })
+                yield _sse_payload(
+                    {
+                        "type": "answer",
+                        "session_id": session_id,
+                        "content": chunk,
+                    }
+                )
                 await asyncio.sleep(0)
 
             metadata = {
@@ -150,12 +152,8 @@ async def chat_es(request: ChatRequest, tenant_id: str = Depends(get_tenant_id))
 async def get_chat_history(session_id: str):
     """
     获取指定会话的对话历史
-    
+
     注意：当前版本暂不支持会话历史存储，返回空列表
     """
     # TODO: 实现会话历史存储和检索
-    return {
-        "session_id": session_id,
-        "history": [],
-        "message": "会话历史功能将在后续版本中实现"
-    }
+    return {"session_id": session_id, "history": [], "message": "会话历史功能将在后续版本中实现"}
