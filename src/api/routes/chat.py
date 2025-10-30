@@ -60,10 +60,14 @@ async def chat_rag(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)
 
         response_time = f"{time.time() - start_time:.2f}s"
         session_id = request.session_id or f"session_{uuid.uuid4().hex[:8]}"
-        sources = list(_format_sources(result.get("sources", [])))
+        raw_sources = result.get("sources", [])
+        sources = list(_format_sources(raw_sources))
+        answer = result.get("answer", "")
+        if result.get("no_results") or not answer.strip():
+            answer = "未找到相关内容。"
 
         return ChatResponse(
-            answer=result.get("answer", ""),
+            answer=answer,
             sources=sources,
             session_id=session_id,
             response_time=response_time,
@@ -89,7 +93,10 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
             )
 
             answer = result.get("answer", "")
-            sources = list(_format_sources(result.get("sources", [])))
+            raw_sources = result.get("sources", [])
+            sources = list(_format_sources(raw_sources))
+            if result.get("no_results") or not answer.strip():
+                answer = "未找到相关内容。"
 
             for chunk in _iter_answer_chunks(answer):
                 yield _sse_payload(
@@ -106,6 +113,7 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
                 "session_id": session_id,
                 "response_time": f"{time.time() - start_time:.2f}s",
                 "sources": [src.model_dump() for src in sources],
+                "no_results": bool(result.get("no_results")),
             }
             yield _sse_payload(metadata, event="complete")
 

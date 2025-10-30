@@ -1,7 +1,7 @@
 ### RAG 同步查询
 POST http://localhost:8000/api/chat
 Content-Type: application/json
-X-Tenant-ID: 2
+X-Tenant-ID: 3
 
 {
   "message": "程波有机器学习的经验吗？",
@@ -28,7 +28,7 @@ X-Tenant-ID: 3
 ### Elasticsearch 关键字查询
 POST http://localhost:8000/api/search
 Content-Type: application/json
-X-Tenant-ID: 2
+X-Tenant-ID: 3
 
 {
   "message": "水池",
@@ -98,3 +98,7 @@ Content-Disposition: form-data; name="callback_url"
 
 https://example.com/hooks/index-finished
 --BOUNDARY--
+
+### 根据文档ID删除文档并清理索引
+DELETE http://localhost:8000/api/documents/123456
+X-Tenant-ID: 3

@@ -459,7 +459,7 @@ async def list_documents():
 
 
 @router.delete("/documents/{document_id}", summary="删除文档")
-async def delete_document(document_id: str):
+async def delete_document(document_id: str, tenant_id: str = Depends(get_tenant_id)):
     """
     删除指定文档
 
@@ -471,44 +471,56 @@ async def delete_document(document_id: str):
 
         # 查找对应的文件
         deleted_files = []
-        for file_path in data_dir.iterdir():
-            if not file_path.is_file() or file_path.name.endswith(".meta.json"):
-                continue
+        if data_dir.exists():
+            for file_path in data_dir.iterdir():
+                if not file_path.is_file() or file_path.name.endswith(".meta.json"):
+                    continue
 
-            metadata = _load_document_metadata(file_path)
-            current_id = metadata.get("document_id")
-            matches = current_id == document_id or (
-                current_id is None and document_id in file_path.stem
-            )
-            if not matches:
-                continue
+                metadata = _load_document_metadata(file_path)
+                current_id = metadata.get("document_id")
+                matches = current_id == document_id or (
+                    current_id is None and document_id in file_path.stem
+                )
+                if not matches:
+                    continue
 
-            file_path.unlink()
-            deleted_files.append(file_path.name)
+                file_path.unlink()
+                deleted_files.append(file_path.name)
 
-            meta_path = _metadata_path_for(file_path)
-            if meta_path.exists():
-                try:
-                    meta_path.unlink()
-                except OSError:
-                    pass
+                meta_path = _metadata_path_for(file_path)
+                if meta_path.exists():
+                    try:
+                        meta_path.unlink()
+                    except OSError:
+                        pass
 
-            if hasattr(knowledge_service, "file_cache"):
-                cache_key = str(file_path)
-                knowledge_service.file_cache.pop(cache_key, None)
-                knowledge_service._save_file_cache()
-
-        if not deleted_files:
-            raise HTTPException(status_code=404, detail=f"文档 {document_id} 不存在")
+                if hasattr(knowledge_service, "file_cache"):
+                    cache_key = str(file_path)
+                    knowledge_service.file_cache.pop(cache_key, None)
+                    knowledge_service._save_file_cache()
 
         try:
-            await knowledge_service.delete_document_async(document_id=document_id)
+            index_result = await knowledge_service.delete_document_async(
+                document_id=document_id,
+                tenant_id=tenant_id,
+            )
         except ValueError:
-            pass
+            index_result = {"vector_deleted": 0, "keyword_deleted": 0}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"删除索引中的文档失败: {exc}")
 
-        return {"message": f"成功删除文档 {document_id}", "deleted_files": deleted_files}
+        vector_deleted = int(index_result.get("vector_deleted", 0))
+        keyword_deleted = int(index_result.get("keyword_deleted", 0))
+
+        if not deleted_files and vector_deleted == 0 and keyword_deleted == 0:
+            raise HTTPException(status_code=404, detail=f"文档 {document_id} 不存在")
+
+        return {
+            "message": f"成功删除文档 {document_id}",
+            "deleted_files": deleted_files,
+            "vector_deleted": vector_deleted,
+            "keyword_deleted": keyword_deleted,
+        }
 
     except HTTPException:
         raise

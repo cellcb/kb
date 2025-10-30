@@ -1553,10 +1553,15 @@ class KnowledgeService:
         )
 
         sources = self._format_sources_from_nodes(response)
+        raw_answer = str(response).strip()
+        normalized_answer = raw_answer.lower()
+        no_results = not sources or not raw_answer or normalized_answer == "empty response"
+        answer_text = raw_answer if not no_results else "未找到相关内容。"
 
         return {
-            "answer": str(response),
+            "answer": answer_text,
             "sources": sources,
+            "no_results": no_results,
         }
 
     async def keyword_search_async(
@@ -1662,6 +1667,7 @@ class KnowledgeService:
         return {
             "answer": answer,
             "sources": sources,
+            "no_results": not sources,
         }
 
     def _format_sources_from_nodes(self, response) -> List[Dict[str, Any]]:
