@@ -86,4 +86,3 @@ class ConversationService:
         result.setdefault("metadata", {})
         result["metadata"]["response_time_secs"] = duration
         return result
-

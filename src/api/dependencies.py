@@ -6,12 +6,11 @@ Dependencies for FastAPI
 import re
 from typing import Optional
 
-from fastapi import HTTPException, Header
+from fastapi import Header, HTTPException
 
 from knowledge import KnowledgeService
 from services.conversation_service import ConversationService
 from services.task_manager import TaskManager
-
 
 _knowledge_service: Optional[KnowledgeService] = None
 _conversation_service: Optional[ConversationService] = None

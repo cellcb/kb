@@ -14,8 +14,8 @@ from services.conversation_service import ConversationService
 from services.task_manager import TaskManager
 
 from . import dependencies
-from .routes import chat, documents, health, tasks
 from .models.chat import ErrorResponse
+from .routes import chat, documents, health, tasks
 
 
 @asynccontextmanager
@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时初始化
     logging.info("启动RAG API服务...")
-    
+
     # 初始化知识服务
     knowledge_service = KnowledgeService(
         data_dir="data",
@@ -40,27 +40,27 @@ async def lifespan(app: FastAPI):
     )
 
     conversation_service = ConversationService(knowledge_service=knowledge_service)
-    
+
     # 初始化任务管理器
     task_manager = TaskManager(max_concurrent_tasks=3, knowledge_service=knowledge_service)
     await task_manager.start_workers()
-    
+
     # 设置全局依赖
     dependencies.set_knowledge_service(knowledge_service)
     dependencies.set_conversation_service(conversation_service)
     dependencies.set_task_manager(task_manager)
-    
+
     # 尝试加载现有索引
     try:
         await knowledge_service.get_or_create_index_async()
         logging.info("默认租户索引加载成功")
     except Exception as e:
         logging.warning(f"RAG索引加载失败: {e}")
-    
+
     logging.info("RAG API服务启动完成")
-    
+
     yield
-    
+
     # 关闭时清理
     logging.info("关闭RAG API服务...")
     await task_manager.stop_workers()
@@ -72,7 +72,7 @@ app = FastAPI(
     title="RAG Demo API",
     description="基于LlamaIndex的RAG（检索增强生成）API服务",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # 添加CORS中间件
@@ -92,10 +92,7 @@ async def global_exception_handler(request, exc):
     logging.error(f"未处理异常: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content=ErrorResponse(
-            error="Internal Server Error",
-            detail=str(exc)
-        ).dict()
+        content=ErrorResponse(error="Internal Server Error", detail=str(exc)).dict(),
     )
 
 
@@ -104,10 +101,7 @@ async def http_exception_handler(request, exc):
     """HTTP异常处理"""
     return JSONResponse(
         status_code=exc.status_code,
-        content=ErrorResponse(
-            error=exc.detail,
-            code=str(exc.status_code)
-        ).dict()
+        content=ErrorResponse(error=exc.detail, code=str(exc.status_code)).dict(),
     )
 
 
@@ -125,22 +119,19 @@ async def root():
         "message": "KB API Service",
         "version": "1.0.0",
         "docs": "/docs",
-        "health": "/api/health"
+        "health": "/api/health",
     }
-
-
-
 
 
 # 配置日志
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 
 def main():
     import uvicorn
+
     uvicorn.run(
         "api.main:app",
         host="0.0.0.0",
@@ -152,4 +143,5 @@ def main():
 
 if __name__ == "__main__":
     import uvicorn
+
     main()

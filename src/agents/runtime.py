@@ -16,4 +16,3 @@ class AgentRuntime:
     async def run(self, message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Placeholder implementation."""
         raise NotImplementedError("AgentRuntime integration coming soon.")
-

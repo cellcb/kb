@@ -65,13 +65,15 @@ docker-compose up -d --build
 - **并行处理**: 可配置1-16个工作线程
 - **批量上传**: 同时处理多个文件
 - **进度追踪**: 实时查看处理状态
+- **回调通知**: 每次上传可指定 `callback_url` 接收索引完成状态
 
 ```bash
 # 示例：上传文档
 curl -X POST "http://localhost:8000/api/documents/upload" \
   -H "Content-Type: multipart/form-data" \
   -F "files=@document.pdf" \
-  -F "parallel_workers=4"
+  -F "parallel_workers=4" \
+  -F "callback_url=https://example.com/hooks/index-finished"
 ```
 
 ### 2. 智能对话

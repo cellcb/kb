@@ -1,4 +1,3 @@
 """
 Shared utilities and configuration.
 """
-
