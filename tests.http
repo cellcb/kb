@@ -1,10 +1,10 @@
 ### RAG 同步查询
 POST http://localhost:8000/api/chat
 Content-Type: application/json
-X-Tenant-ID: 3
+X-Tenant-ID: 1
 
 {
-  "message": "程波有机器学习的经验吗？",
+  "message": "agent 开发介绍？",
   "search_params": {
     "top_k": 5,
     "response_mode": "compact"
@@ -15,7 +15,7 @@ X-Tenant-ID: 3
 POST http://localhost:8000/api/chat/stream
 Content-Type: application/json
 Accept: text/event-stream
-X-Tenant-ID: 3
+X-Tenant-ID: 1
 
 {
   "message": "狮民肋板水池有什么问题",
@@ -28,10 +28,10 @@ X-Tenant-ID: 3
 ### Elasticsearch 关键字查询
 POST http://localhost:8000/api/search
 Content-Type: application/json
-X-Tenant-ID: 3
+X-Tenant-ID: 1
 
 {
-  "message": "水池",
+  "message": "agent",
   "search_params": {
     "top_k": 5,
     "min_score": 0.5
@@ -100,5 +100,5 @@ https://example.com/hooks/index-finished
 --BOUNDARY--
 
 ### 根据文档ID删除文档并清理索引
-DELETE http://localhost:8000/api/documents/123456
-X-Tenant-ID: 3
+DELETE http://localhost:8000/api/documents/18
+X-Tenant-ID: 1
