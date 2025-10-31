@@ -18,7 +18,7 @@ Accept: text/event-stream
 X-Tenant-ID: 1
 
 {
-  "message": "狮民肋板水池有什么问题",
+  "message": "agent 开发介绍",
   "search_params": {
     "top_k": 5,
     "response_mode": "compact"
