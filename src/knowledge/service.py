@@ -1533,7 +1533,6 @@ class KnowledgeService:
         if runtime.index is None:
             raise RuntimeError("向量索引尚未初始化，请先通过文档管理接口导入或构建索引后再检索。")
 
-        loop = asyncio.get_event_loop()
         top_k = 5
         if similarity_top_k is not None:
             try:
@@ -1546,11 +1545,16 @@ class KnowledgeService:
             similarity_top_k=top_k,
         )
 
-        response = await loop.run_in_executor(
-            None,
-            query_engine.query,
-            question,
-        )
+        # Prefer async query interface when available to avoid blocking and timeout issues
+        if hasattr(query_engine, "aquery"):
+            response = await query_engine.aquery(question)
+        else:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                query_engine.query,
+                question,
+            )
 
         sources = self._format_sources_from_nodes(response)
         raw_answer = str(response).strip()
