@@ -98,6 +98,10 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
     payload["session_id_generated"] = session_id
     _log_request("chat_rag_stream", payload)
 
+    logger.info(
+        "chat_rag_stream.start tenant=%s session=%s", tenant_id, session_id, extra={"tenant_id": tenant_id, "session_id": session_id}
+    )
+
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
             result = await conversation_service.rag_query(
@@ -112,6 +116,9 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
             if result.get("no_results") or not answer.strip():
                 answer = "未找到相关内容。"
 
+            chunk_count = 0
+            byte_count = 0
+
             for chunk in _iter_answer_chunks(answer):
                 yield _sse_payload(
                     {
@@ -121,6 +128,8 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
                     }
                 )
                 await asyncio.sleep(0)
+                chunk_count += 1
+                byte_count += len(chunk.encode("utf-8"))
 
             metadata = {
                 "type": "metadata",
@@ -131,9 +140,29 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
             }
             yield _sse_payload(metadata, event="complete")
 
+            logger.info(
+                "chat_rag_stream.complete tenant=%s session=%s chunks=%d bytes=%d duration_ms=%d",
+                tenant_id,
+                session_id,
+                chunk_count,
+                byte_count,
+                int((time.time() - start_time) * 1000),
+                extra={
+                    "tenant_id": tenant_id,
+                    "session_id": session_id,
+                },
+            )
+
         except Exception as exc:  # pragma: no cover - SSE 错误直接写入流
             error_payload = {"type": "error", "message": str(exc)}
             yield _sse_payload(error_payload, event="error")
+            logger.error(
+                "chat_rag_stream.error tenant=%s session=%s exc=%s",
+                tenant_id,
+                session_id,
+                exc,
+                extra={"tenant_id": tenant_id, "session_id": session_id},
+            )
 
     headers = {
         "Cache-Control": "no-cache",

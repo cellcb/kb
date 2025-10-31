@@ -1,7 +1,7 @@
 # RAG Demo Makefile (使用 uv)
 # 常用开发命令的快捷方式
 
-.PHONY: help install dev start test clean format lint build docker dist dist-native dist-x86_64
+.PHONY: help install dev start start-uv start-uv-noreload test clean format lint build docker dist dist-native dist-x86_64
 
 DIST_ENTRY ?= scripts/run_service.py
 DIST_NAME ?= kb-service
@@ -42,7 +42,11 @@ start:  ## 启动Web服务
 
 start-uv:  ## 使用uv启动Web服务
 	@echo "🚀 使用uv启动Web服务..."
-	UVICORN_LOOP=asyncio uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+start-uv-noreload:  ## 使用uv启动Web服务（禁用热重载）
+	@echo "🚀 使用uv启动Web服务（禁用热重载）..."
+	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
 
 test:  ## 运行API测试
 	@echo "🧪 运行API测试..."

@@ -96,9 +96,14 @@ docker compose up -d elasticsearch
 #### 1. 上传文档
 ```bash
 curl -X POST "http://localhost:8000/api/documents/upload" \
-  -H "Content-Type: multipart/form-data" \
-  -F "files=@document.pdf" \
-  -F "parallel_workers=4"
+  -H "X-Tenant-ID: default" \
+  -F "files=@/path/to/contract.pdf" \
+  -F "files=@/path/to/spec.txt" \
+  -F "parallel_workers=4" \
+  -F "enable_batch_processing=true" \
+  -F "priority=normal" \
+  -F "callback_url=https://example.com/callback" \
+  -F 'document_ids=["contract-2024","spec-1"]'
 ```
 
 #### 2. 查询对话
@@ -107,6 +112,8 @@ curl -X POST "http://localhost:8000/api/chat" \
   -H "Content-Type: application/json" \
   -d '{"message": "什么是机器学习？"}'
 ```
+
+> `search_params.response_mode` 默认为 `compact`，表示 LlamaIndex 仅返回精简自然语言答案，适合面向终端用户的展示。如果需要更详细的推理过程，可将其改为 `tree_summarize` 或其它模式。
 
 #### 3. 查看文档列表
 ```bash
@@ -164,6 +171,25 @@ rag-demo/
 - ✅ **多页文档**: 支持多页PDF，保留页面信息
 - ✅ **错误处理**: 自动跳过损坏或扫描版PDF
 - ✅ **缓存机制**: 避免重复处理相同文件
+
+## 🔍 日志与监控
+
+- `LOG_LEVEL`：根日志级别，默认 `info`
+- `APP_LOG_JSON`：设为 `true` 启用 JSON 行输出
+- `APP_REQUEST_LOG_LEVEL`：请求体日志级别（建议 `debug`）
+- `APP_REQUEST_LOG_MAX_BYTES`：请求体日志截断长度（默认 4096 字节）
+- `APP_REQUEST_LOG_EXCLUDE_PATHS`：逗号分隔的排除路径前缀
+- `APP_REQUEST_LOG_PRETTY`：设为 `true` 时美化 JSON 请求体
+- `APP_LOG_REDACT_KEYS`：需要脱敏的字段列表（例如 `authorization,token,password`）
+- `APP_ACCESS_LOG_LEVEL`：`uvicorn.access` 的日志级别
+
+运行时可通过管理接口调整日志级别：
+
+```bash
+curl -X PUT "http://localhost:8000/api/admin/loggers/uvicorn.access?level=DEBUG"
+```
+
+上面的命令会即时提高访问日志的详细程度，方便在排障期间观察请求情况。
 
 ## 🛠️ 开发
 

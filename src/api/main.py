@@ -13,9 +13,12 @@ from knowledge import KnowledgeService
 from services.conversation_service import ConversationService
 from services.task_manager import TaskManager
 
+from shared.logging_config import configure_logging
+from shared.request_logging import RequestLoggingMiddleware
+
 from . import dependencies
 from .models.chat import ErrorResponse
-from .routes import chat, documents, health, tasks
+from .routes import admin, chat, documents, health, tasks
 
 
 @asynccontextmanager
@@ -67,6 +70,9 @@ async def lifespan(app: FastAPI):
     logging.info("RAG API服务已关闭")
 
 
+# 统一日志配置（在应用初始化前执行一次）
+configure_logging()
+
 # 创建FastAPI应用
 app = FastAPI(
     title="RAG Demo API",
@@ -83,6 +89,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 记录原始请求体（JSON/表单），其余类型保持摘要
+app.add_middleware(RequestLoggingMiddleware)
 
 
 # 全局异常处理器
@@ -110,6 +119,7 @@ app.include_router(health.router, prefix="/api", tags=["健康检查"])
 app.include_router(chat.router, prefix="/api", tags=["对话"])
 app.include_router(documents.router, prefix="/api", tags=["文档管理"])
 app.include_router(tasks.router, prefix="/api", tags=["任务管理"])
+app.include_router(admin.router, prefix="/api", tags=["管理"])
 
 
 @app.get("/", summary="根路径")
@@ -122,11 +132,6 @@ async def root():
         "health": "/api/health",
     }
 
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
 
 
 def main():

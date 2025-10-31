@@ -476,17 +476,8 @@ class KnowledgeService:
         self._ensure_keyword_index(tenant_id=tenant_id, force=True)
 
     def _setup_logger(self) -> logging.Logger:
-        """配置日志记录器"""
-        logger = logging.getLogger(f"{__name__}.KnowledgeService")
-        logger.setLevel(logging.INFO)
-
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-
-        return logger
+        """Return the shared knowledge-service logger."""
+        return logging.getLogger("knowledge")
 
     def _setup_embedding_model(self, model_name: str):
         """配置embedding模型"""

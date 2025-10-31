@@ -62,18 +62,8 @@ class TaskManager:
         self.knowledge_service = knowledge_service
 
     def _setup_logger(self) -> logging.Logger:
-        """配置日志记录器"""
-        logger = logging.getLogger(f"{__name__}.TaskManager")
-        logger.setLevel(logging.DEBUG)
-        logger.propagate = False
-
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-
-        return logger
+        """Return the shared task-manager logger."""
+        return logging.getLogger("services.task_manager")
 
     def _generate_task_id(self) -> str:
         """生成唯一任务ID"""
@@ -285,19 +275,24 @@ class TaskManager:
             payload_json = json.dumps(simplified_payload, ensure_ascii=False)
             payload_bytes = len(payload_json.encode("utf-8"))
             results_count = len(payload.get("results", []))
+            start_time = time.time()
             self.logger.info(
-                "任务 %s 准备发送回调: url=%s, status=%s, results=%d, payload_bytes=%d, tenant=%s",
+                "callback.start task=%s url=%s status=%s docs=%d bytes=%d",
                 task_data.task_id,
                 task_data.callback_url,
                 payload.get("status"),
                 results_count,
                 payload_bytes,
-                task_data.tenant_id,
+                extra={
+                    "task_id": task_data.task_id,
+                    "tenant_id": task_data.tenant_id,
+                },
             )
             self.logger.debug(
-                "任务 %s 回调请求体: %s",
+                "callback.payload task=%s %s",
                 task_data.task_id,
                 payload_json,
+                extra={"task_id": task_data.task_id},
             )
             headers = {
                 "Content-Type": "application/json; charset=utf-8",
@@ -313,17 +308,28 @@ class TaskManager:
                     headers=headers,
                 )
                 response.raise_for_status()
+            duration_ms = int((time.time() - start_time) * 1000)
             self.logger.info(
-                "任务 %s 回调通知已发送至 %s (status=%s)",
+                "callback.success task=%s url=%s http_status=%s duration_ms=%d",
                 task_data.task_id,
                 task_data.callback_url,
-                payload["status"],
+                response.status_code,
+                duration_ms,
+                extra={
+                    "task_id": task_data.task_id,
+                    "tenant_id": task_data.tenant_id,
+                },
             )
         except Exception as exc:
             self.logger.error(
-                "任务 %s 回调通知失败: %s",
+                "callback.error task=%s url=%s exc=%s",
                 task_data.task_id,
+                task_data.callback_url,
                 exc,
+                extra={
+                    "task_id": task_data.task_id,
+                    "tenant_id": task_data.tenant_id,
+                },
             )
 
     def _build_callback_payload(self, task_data: TaskData) -> Dict[str, Any]:
