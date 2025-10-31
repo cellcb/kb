@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from typing import AsyncGenerator, Dict, Iterable, List
@@ -13,6 +14,12 @@ from ..dependencies import get_conversation_service, get_tenant_id
 from ..models.chat import ChatRequest, ChatResponse, SourceInfo
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _log_request(label: str, payload: Dict[str, object]):
+    """统一格式化请求日志"""
+    logger.info("%s %s", label, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _format_sources(raw_sources: Iterable[Dict[str, object]]) -> List[SourceInfo]:
@@ -51,6 +58,9 @@ async def chat_rag(request: ChatRequest, tenant_id: str = Depends(get_tenant_id)
     try:
         conversation_service = get_conversation_service()
         start_time = time.time()
+        payload = request.model_dump(exclude_none=False)
+        payload["tenant_id"] = tenant_id
+        _log_request("chat_rag", payload)
 
         result = await conversation_service.rag_query(
             request.message,
@@ -83,6 +93,10 @@ async def chat_rag_stream(request: ChatRequest, tenant_id: str = Depends(get_ten
     conversation_service = get_conversation_service()
     session_id = request.session_id or f"session_{uuid.uuid4().hex[:8]}"
     start_time = time.time()
+    payload = request.model_dump(exclude_none=False)
+    payload["tenant_id"] = tenant_id
+    payload["session_id_generated"] = session_id
+    _log_request("chat_rag_stream", payload)
 
     async def event_stream() -> AsyncGenerator[str, None]:
         try:
@@ -134,6 +148,9 @@ async def chat_es(request: ChatRequest, tenant_id: str = Depends(get_tenant_id))
     try:
         conversation_service = get_conversation_service()
         start_time = time.time()
+        payload = request.model_dump(exclude_none=False)
+        payload["tenant_id"] = tenant_id
+        _log_request("chat_es", payload)
 
         result = await conversation_service.keyword_query(
             request.message,
@@ -163,5 +180,6 @@ async def get_chat_history(session_id: str):
 
     注意：当前版本暂不支持会话历史存储，返回空列表
     """
+    _log_request("get_chat_history", {"session_id": session_id})
     # TODO: 实现会话历史存储和检索
     return {"session_id": session_id, "history": [], "message": "会话历史功能将在后续版本中实现"}

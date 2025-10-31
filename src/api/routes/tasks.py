@@ -2,7 +2,9 @@
 Task Management API Routes
 """
 
-from typing import List
+import json
+import logging
+from typing import Dict, List
 
 from fastapi import APIRouter, HTTPException
 
@@ -10,6 +12,12 @@ from ..dependencies import get_task_manager
 from ..models.documents import TaskInfo
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _log_request(label: str, payload: Dict[str, object]):
+    """统一格式化请求日志"""
+    logger.info("%s %s", label, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @router.get("/tasks/{task_id}", response_model=TaskInfo, summary="获取任务状态")
@@ -20,6 +28,7 @@ async def get_task_status(task_id: str):
     - **task_id**: 任务ID
     """
     try:
+        _log_request("tasks.get_status", {"task_id": task_id})
         task_manager = get_task_manager()
         task_info = task_manager.get_task_status(task_id)
 
@@ -64,6 +73,7 @@ async def cancel_task(task_id: str):
     注意：当前版本暂不支持任务取消，返回提示信息
     """
     # TODO: 实现任务取消功能
+    _log_request("tasks.cancel", {"task_id": task_id})
     return {"message": f"任务取消功能将在后续版本中实现", "task_id": task_id}
 
 
@@ -75,6 +85,7 @@ async def cleanup_completed_tasks(max_age_hours: int = 24):
     - **max_age_hours**: 任务最大保留时间（小时）
     """
     try:
+        _log_request("tasks.cleanup", {"max_age_hours": max_age_hours})
         task_manager = get_task_manager()
         await task_manager.cleanup_completed_tasks(max_age_hours)
 

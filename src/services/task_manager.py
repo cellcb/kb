@@ -3,6 +3,7 @@ Task Manager for Async Document Processing
 """
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -63,7 +64,8 @@ class TaskManager:
     def _setup_logger(self) -> logging.Logger:
         """配置日志记录器"""
         logger = logging.getLogger(f"{__name__}.TaskManager")
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
 
         if not logger.handlers:
             handler = logging.StreamHandler()
@@ -269,8 +271,47 @@ class TaskManager:
 
         payload = self._build_callback_payload(task_data)
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(task_data.callback_url, json=payload)
+            simplified_payload = {
+                "task_id": payload.get("task_id"),
+                "status": payload.get("status"),
+                "start_time": payload.get("start_time"),
+                "end_time": payload.get("end_time"),
+                "error": payload.get("error"),
+                "tenant_id": payload.get("tenant_id"),
+                "document_ids": [
+                    result.get("document_id") for result in payload.get("results", [])
+                ],
+            }
+            payload_json = json.dumps(simplified_payload, ensure_ascii=False)
+            payload_bytes = len(payload_json.encode("utf-8"))
+            results_count = len(payload.get("results", []))
+            self.logger.info(
+                "任务 %s 准备发送回调: url=%s, status=%s, results=%d, payload_bytes=%d, tenant=%s",
+                task_data.task_id,
+                task_data.callback_url,
+                payload.get("status"),
+                results_count,
+                payload_bytes,
+                task_data.tenant_id,
+            )
+            self.logger.debug(
+                "任务 %s 回调请求体: %s",
+                task_data.task_id,
+                payload_json,
+            )
+            headers = {
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "*/*",
+                "User-Agent": "curl/8.7.1 (TaskManager)",
+                "Connection": "close",
+            }
+            payload_bytes_data = payload_json.encode("utf-8")
+            async with httpx.AsyncClient(timeout=10.0, http2=False) as client:
+                response = await client.post(
+                    task_data.callback_url,
+                    content=payload_bytes_data,
+                    headers=headers,
+                )
                 response.raise_for_status()
             self.logger.info(
                 "任务 %s 回调通知已发送至 %s (status=%s)",

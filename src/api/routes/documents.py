@@ -1,6 +1,7 @@
 """Document Management API Routes"""
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -28,6 +29,12 @@ from ..models.documents import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _log_request(label: str, payload: Dict[str, Any]):
+    """统一格式化请求日志"""
+    logger.info("%s %s", label, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @router.post("/documents/ingest", response_model=IngestResponse, summary="接收外部文档数据")
@@ -35,6 +42,9 @@ async def ingest_documents(request: IngestRequest, tenant_id: str = Depends(get_
     """接收外部服务提交的已处理文档并更新索引"""
     try:
         knowledge_service = get_knowledge_service()
+        payload = request.model_dump(exclude_none=False)
+        payload["tenant_id"] = tenant_id
+        _log_request("documents.ingest", payload)
         payload = [doc.dict() for doc in request.documents]
         result = await knowledge_service.ingest_documents_async(
             payload,
@@ -71,6 +81,15 @@ async def ingest_documents_from_files(
         raise HTTPException(status_code=400, detail="请提供至少一个文件")
 
     allowed_ext = {".pdf", ".docx", ".txt"}
+    _log_request(
+        "documents.ingest_upload",
+        {
+            "tenant_id": tenant_id,
+            "files": [file.filename for file in files],
+            "reset_index": reset_index,
+            "metadata": metadata,
+        },
+    )
 
     metadata_map: Dict[str, Dict[str, Any]] = {}
     if metadata:
@@ -200,6 +219,18 @@ async def upload_documents(
     - **priority**: 处理优先级 (high/normal/low)
     """
     try:
+        _log_request(
+            "documents.upload",
+            {
+                "tenant_id": tenant_id,
+                "files": [file.filename for file in files] if files else [],
+                "parallel_workers": parallel_workers,
+                "enable_batch_processing": enable_batch_processing,
+                "priority": priority,
+                "callback_url": callback_url,
+                "document_ids": document_ids,
+            },
+        )
         if not files:
             raise HTTPException(status_code=400, detail="请选择要上传的文件")
 
@@ -466,11 +497,11 @@ async def delete_document(document_id: str, tenant_id: str = Depends(get_tenant_
     - **document_id**: 文档ID
     """
     try:
+        _log_request("documents.delete", {"tenant_id": tenant_id, "document_id": document_id})
         knowledge_service = get_knowledge_service()
         data_dir = knowledge_service.data_dir
 
-        # 查找对应的文件
-        deleted_files = []
+        deleted_files: List[str] = []
         if data_dir.exists():
             for file_path in data_dir.iterdir():
                 if not file_path.is_file() or file_path.name.endswith(".meta.json"):
@@ -537,6 +568,9 @@ async def rebuild_index(request: IndexRebuildRequest, tenant_id: str = Depends(g
     - **force**: 是否强制重建
     """
     try:
+        payload = request.model_dump(exclude_none=False)
+        payload["tenant_id"] = tenant_id
+        _log_request("documents.rebuild_index", payload)
         knowledge_service = get_knowledge_service()
         task_manager = get_task_manager()
 
@@ -579,6 +613,7 @@ async def update_config(config: ConfigUpdate):
     - **chunk_size**: 文本分块大小
     """
     try:
+        _log_request("documents.update_config", config.model_dump(exclude_none=True))
         knowledge_service = get_knowledge_service()
         updated_config = {}
 
