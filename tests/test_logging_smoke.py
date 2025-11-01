@@ -16,6 +16,11 @@ from shared.request_logging import RequestLoggingMiddleware
 
 configure_logging()
 
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
 class _StubConversationService:
     async def rag_query(self, message: str, search_params=None, tenant_id: str | None = None):
         return {"answer": "Hello world", "sources": [], "no_results": False}
@@ -53,14 +58,14 @@ def test_sse_logging(monkeypatch, caplog):
             json={"message": "hi", "session_id": "sess"},
             headers={"X-Tenant-ID": "tenant-test"},
         ) as response:
-            list(response.iter_content())  # consume stream to trigger completion
+            list(response.iter_text())  # consume stream to trigger completion
 
     messages = [record.message for record in caplog.records if record.name == "api.routes.chat"]
     assert any("chat_rag_stream.start" in message for message in messages)
     assert any("chat_rag_stream.complete" in message for message in messages)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_task_manager_callback_logging_success(monkeypatch, caplog):
     class DummyResponse:
         status_code = 200
@@ -117,7 +122,7 @@ async def test_task_manager_callback_logging_success(monkeypatch, caplog):
     assert any("callback.success" in message for message in messages)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_task_manager_callback_logging_error(monkeypatch, caplog):
     class FailingClient:
         async def __aenter__(self):

@@ -1,0 +1,54 @@
+###############################
+# KB Service Configuration (TOML)
+#
+# - Highest priority over .env and defaults
+# - Relative paths resolve from this file's directory
+# - macOS/Linux friendly; no embedded models in the binary
+###############################
+
+[server]
+host = "0.0.0.0"
+port = 8000
+
+[logging]
+level = "info"              # debug/info/warning/error
+json_logs = false            # true -> JSON logs; false -> human-readable
+access_level = "info"       # uvicorn.access logger level
+request_pretty = true        # pretty-print JSON request bodies for readability
+request_max_bytes = 8192     # cap request-body log size
+
+[knowledge]
+data_dir = "data"           # relative to this file
+persist_dir = "storage"      # caches, state, models
+auto_ingest_local_data = false
+enable_parallel = true
+max_workers = 4
+
+# Embeddings (externalized; not bundled in the executable)
+embedding_model = "BAAI/bge-small-zh-v1.5"
+embedding_cache_dir = "storage/models"
+embedding_local_files_only = false   # set true if running fully offline
+
+[elasticsearch]
+url = "http://localhost:9200"
+index = "kb-documents"              # actual index -> "<tenant>-kb-documents"
+text_index = "kb-documents-text"     # actual index -> "<tenant>-kb-documents-text"
+# user = "elastic"                   # uncomment if basic auth is used
+# password = "changeme"
+verify_certs = false                  # set true for TLS with trusted certs
+# ca_certs = "certs/ca.crt"           # provide when verify_certs=true and custom CA
+timeout = 30
+text_analyzer = "standard"
+
+[tasks]
+max_concurrent_tasks = 3
+
+# LLM provider configuration (externalized)
+[llm]
+provider = "openai_like"
+api_base = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = "155d5cb5-6b83-4d52-8be8-eb795c72ad44"
+model = "deepseek-v3-250324"
+#model = "DeepSeek-V3.1"
+temperature = 0.1
+is_chat_model = true

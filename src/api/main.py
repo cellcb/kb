@@ -1,9 +1,13 @@
-"""
-FastAPI entrypoint wiring services and routers.
+"""FastAPI entrypoint wiring services and routers.
+
+When launched via ``scripts/run_service.py -c config.toml``, the loader
+publishes a process-wide configuration accessible here. In development
+without a TOML file, the legacy defaults (.env fallback) remain in effect.
 """
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +17,7 @@ from knowledge import KnowledgeService
 from services.conversation_service import ConversationService
 from services.task_manager import TaskManager
 
+from shared.config_loader import get_current_config
 from shared.logging_config import configure_logging
 from shared.request_logging import RequestLoggingMiddleware
 
@@ -27,15 +32,51 @@ async def lifespan(app: FastAPI):
     # 启动时初始化
     logging.info("启动RAG API服务...")
 
-    # 初始化知识服务
-    knowledge_service = KnowledgeService(
-        data_dir="data",
-        persist_dir="storage",
-        embedding_model="BAAI/bge-small-zh-v1.5",
-        enable_parallel=True,
-        max_workers=4,
-        auto_ingest_local_data=False,
-    )
+    # 初始化知识服务（优先使用外部配置）
+    conf = get_current_config()
+
+    if conf is not None:
+        # Optional: configure LLM from config before KnowledgeService uses Settings
+        try:
+            if conf.llm and conf.llm.provider == "openai_like":
+                from llama_index.core import Settings
+                from llama_index.llms.openai_like import OpenAILike
+
+                Settings.llm = OpenAILike(
+                    model=conf.llm.model,
+                    api_key=conf.llm.api_key,
+                    api_base=conf.llm.api_base,
+                    is_chat_model=bool(conf.llm.is_chat_model),
+                    temperature=float(conf.llm.temperature),
+                )
+        except Exception as e:  # pragma: no cover - defensive guardrail
+            logging.warning(f"LLM 配置初始化失败，将使用默认设置: {e}")
+
+        knowledge_service = KnowledgeService(
+            data_dir=conf.knowledge.data_dir,
+            persist_dir=conf.knowledge.persist_dir,
+            embedding_model=conf.knowledge.embedding_model,
+            embedding_cache_dir=conf.knowledge.embedding_cache_dir,
+            embedding_local_files_only=conf.knowledge.embedding_local_files_only,
+            enable_parallel=bool(conf.knowledge.enable_parallel),
+            max_workers=int(conf.knowledge.max_workers),
+            auto_ingest_local_data=bool(conf.knowledge.auto_ingest_local_data),
+            es_url=conf.elasticsearch.url,
+            es_index=conf.elasticsearch.index,
+            es_keyword_index=conf.elasticsearch.text_index,
+            es_user=conf.elasticsearch.user,
+            es_password=conf.elasticsearch.password,
+            es_text_analyzer=conf.elasticsearch.text_analyzer,
+        )
+    else:
+        knowledge_service = KnowledgeService(
+            data_dir="data",
+            persist_dir="storage",
+            embedding_model="BAAI/bge-small-zh-v1.5",
+            enable_parallel=True,
+            max_workers=4,
+            auto_ingest_local_data=False,
+        )
     logging.info(
         "Elasticsearch vector store -> %s (index template: %s)",
         knowledge_service.es_url,
@@ -45,7 +86,8 @@ async def lifespan(app: FastAPI):
     conversation_service = ConversationService(knowledge_service=knowledge_service)
 
     # 初始化任务管理器
-    task_manager = TaskManager(max_concurrent_tasks=3, knowledge_service=knowledge_service)
+    max_tasks = conf.tasks.max_concurrent_tasks if conf is not None else 3
+    task_manager = TaskManager(max_concurrent_tasks=max_tasks, knowledge_service=knowledge_service)
     await task_manager.start_workers()
 
     # 设置全局依赖

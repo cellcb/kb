@@ -157,14 +157,30 @@ class KnowledgeService:
         self.file_cache = self._load_file_cache()
         self.es_client = None
 
-        # 配置LlamaIndex设置 - 使用自定义DeepSeek LLM
-        Settings.llm = OpenAILike(
-            model="deepseek-v3-250324",
-            api_key="155d5cb5-6b83-4d52-8be8-eb795c72ad44",
-            api_base="https://ark.cn-beijing.volces.com/api/v3",
-            is_chat_model=True,
-            temperature=0.1,
-        )
+        # 配置 LlamaIndex LLM（优先读取外部配置/环境变量）。
+        # 当未提供任何 LLM 相关环境变量时，保留 LlamaIndex 的默认设置。
+        try:
+            # Minimal env contract for packaged runs (also set by config loader):
+            #   LLM_PROVIDER=openai_like (optional)
+            #   LLM_API_BASE, LLM_API_KEY, LLM_MODEL, LLM_TEMPERATURE, LLM_IS_CHAT_MODEL
+            if os.getenv("LLM_API_KEY") or os.getenv("LLM_API_BASE") or os.getenv("LLM_MODEL"):
+                from llama_index.llms.openai_like import OpenAILike
+
+                def _env_flag(name: str, default: bool) -> bool:
+                    raw = os.getenv(name)
+                    if raw is None:
+                        return default
+                    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+                Settings.llm = OpenAILike(
+                    model=os.getenv("LLM_MODEL", ""),
+                    api_key=os.getenv("LLM_API_KEY", ""),
+                    api_base=os.getenv("LLM_API_BASE", ""),
+                    is_chat_model=_env_flag("LLM_IS_CHAT_MODEL", True),
+                    temperature=float(os.getenv("LLM_TEMPERATURE", "0.1")),
+                )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.warning("初始化 LLM 设置失败，将使用默认: %s", exc)
 
         # 使用本地embedding模型
         self._setup_embedding_model(embedding_model)

@@ -1,7 +1,7 @@
 # RAG Demo Makefile (使用 uv)
 # 常用开发命令的快捷方式
 
-.PHONY: help install dev start start-uv start-uv-noreload test clean format lint build docker dist dist-native dist-x86_64
+.PHONY: help install dev start start-uv start-uv-noreload start-c start-c-reload test clean format lint build docker dist dist-native dist-x86_64
 
 DIST_ENTRY ?= scripts/run_service.py
 DIST_NAME ?= kb-service
@@ -16,6 +16,9 @@ DIST_MODEL_DIR ?= storage/models
 DIST_MODEL_PAYLOAD := $(strip $(wildcard $(DIST_MODEL_DIR)))
 DIST_MODEL_FLAG := $(if $(DIST_MODEL_PAYLOAD),--add-data $(DIST_MODEL_DIR):storage/models,)
 PYINSTALLER ?= uv run pyinstaller
+
+# Config file path (relative to project root by default)
+CONFIG ?= ./config.toml
 
 # Set X86_64_PYTHON to the interpreter capable of producing x86_64 binaries.
 # Example: X86_64_PYTHON="/usr/bin/arch -x86_64 python3"
@@ -36,17 +39,25 @@ install-dev:  ## 安装开发依赖
 	uv sync --dev
 	@echo "✅ 开发依赖安装完成"
 
-start:  ## 启动Web服务
-	@echo "🚀 启动Web服务..."
-	python start_web.py
+start:  ## 启动Web服务（加载 config.toml，禁用热重载）
+	@echo "🚀 启动Web服务（加载 $(CONFIG)）..."
+	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run python $(DIST_ENTRY) -c $(CONFIG)
 
-start-uv:  ## 使用uv启动Web服务
-	@echo "🚀 使用uv启动Web服务..."
-	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+start-uv:  ## 使用uv启动Web服务（加载 config.toml 并启用热重载）
+	@echo "🚀 使用uv启动Web服务（加载 $(CONFIG) 并启用热重载）..."
+	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run python $(DIST_ENTRY) -c $(CONFIG) --reload
 
-start-uv-noreload:  ## 使用uv启动Web服务（禁用热重载）
-	@echo "🚀 使用uv启动Web服务（禁用热重载）..."
-	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+start-uv-noreload:  ## 使用uv启动Web服务（加载 config.toml，禁用热重载）
+	@echo "🚀 使用uv启动Web服务（加载 $(CONFIG)，禁用热重载）..."
+	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run python $(DIST_ENTRY) -c $(CONFIG)
+
+start-c:  ## 使用配置文件启动（无热重载）
+	@echo "🚀 使用配置文件启动（$(CONFIG)）..."
+	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run python $(DIST_ENTRY) -c $(CONFIG)
+
+start-c-reload:  ## 使用配置文件启动（热重载）
+	@echo "🚀 使用配置文件启动（$(CONFIG)，热重载）..."
+	TOKENIZERS_PARALLELISM=false UVICORN_LOOP=asyncio uv run python $(DIST_ENTRY) -c $(CONFIG) --reload
 
 test:  ## 运行API测试
 	@echo "🧪 运行API测试..."

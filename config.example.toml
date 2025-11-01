@@ -1,0 +1,54 @@
+###############################
+# Example configuration (TOML)
+#
+# Notes:
+# - Relative paths resolve from this file's directory
+# - This file has highest priority; missing fields fall back to .env, then defaults
+# - macOS/Linux friendly paths are used
+###############################
+
+[server]
+host = "0.0.0.0"
+port = 8000
+
+[logging]
+level = "info"              # debug/info/warning/error
+json_logs = false            # set to true for JSON logs
+access_level = "info"       # uvicorn.access level
+request_pretty = true        # pretty-print JSON request bodies
+request_max_bytes = 4096
+
+[knowledge]
+data_dir = "data"
+persist_dir = "storage"
+auto_ingest_local_data = false
+enable_parallel = true
+max_workers = 4
+
+# Embedding
+embedding_model = "BAAI/bge-small-zh-v1.5"
+# embedding_cache_dir = "storage/models"
+# embedding_local_files_only = true
+
+[elasticsearch]
+url = "http://localhost:9200"
+index = "kb-documents"
+text_index = "kb-documents-text"
+# user = "elastic"
+# password = "changeme"
+# verify_certs = true
+# ca_certs = "certs/ca.crt"
+# timeout = 30
+# text_analyzer = "standard"
+
+[tasks]
+max_concurrent_tasks = 3
+
+# LLM settings (provider: openai_like)
+[llm]
+provider = "openai_like"
+api_base = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = "REPLACE_WITH_REAL_KEY"
+model = "deepseek-v3-250324"
+temperature = 0.1
+is_chat_model = true

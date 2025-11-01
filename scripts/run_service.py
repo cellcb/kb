@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Executable entrypoint for packaging the FastAPI service."""
+"""Executable entrypoint requiring a TOML config file (-c/--config).
+
+This entrypoint is intended for packaged binaries (PyInstaller) and for
+operational runs. It enforces explicit configuration and exports logging
+knobs to the environment so the API's import-time logging setup reflects
+the user's preferences.
+"""
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -25,6 +32,9 @@ def _ensure_import_paths() -> None:
 
 
 _ensure_import_paths()
+
+# Delayed imports until sys.path is adjusted
+from shared.config_loader import apply_env_from_config, load_config, set_current_config  # noqa: E402
 
 
 def _resolve_app_import_path() -> str:
@@ -49,24 +59,41 @@ def _configure_runtime_env() -> None:
         os.chdir(exe_dir)
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="KB API Service")
+    parser.add_argument(
+        "-c",
+        "--config",
+        required=True,
+        help="Path to TOML configuration file (relative paths resolved from file dir)",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable Uvicorn autoreload (development mode)",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    """Start the FastAPI service via Uvicorn."""
+    """Start the FastAPI service via Uvicorn with explicit config."""
 
     _configure_runtime_env()
+    args = _parse_args()
 
-    host = os.environ.get("APP_HOST", "0.0.0.0")
-    port = int(os.environ.get("APP_PORT", "8000"))
-    log_level = os.environ.get("APP_LOG_LEVEL", "info")
+    conf = load_config(args.config)
+    set_current_config(conf)
+    apply_env_from_config(conf)
 
-    print("Starting KB service ...")
+    print(f"Starting KB service with config: {conf._config_path}")
 
     try:
         uvicorn.run(
             _resolve_app_import_path(),
-            host=host,
-            port=port,
-            reload=False,
-            log_level=log_level,
+            host=conf.server.host,
+            port=conf.server.port,
+            reload=bool(args.reload),
+            log_level=str(conf.logging.level).lower(),
         )
     except ModuleNotFoundError as exc:
         missing = exc.name or str(exc)

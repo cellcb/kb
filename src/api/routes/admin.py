@@ -7,6 +7,7 @@ from typing import Dict
 
 from fastapi import APIRouter, HTTPException
 
+from shared.config_loader import get_current_config
 from shared.logging_config import iter_logger_levels, set_log_level
 
 
@@ -46,3 +47,17 @@ async def update_logger_level(logger_name: str, level: str) -> Dict[str, str]:
     except Exception as exc:  # pragma: no cover - defensive guardrail
         raise HTTPException(status_code=400, detail=f"无法设置日志级别: {exc}")
 
+
+@router.get("/admin/config", summary="查看当前有效配置")
+async def get_effective_config() -> Dict[str, object]:
+    """Return the full effective runtime configuration as a JSON object.
+
+    Per user instruction, no masking is applied. Use with caution in production.
+    """
+
+    conf = get_current_config()
+    if conf is None:
+        return {"active": False, "note": "没有加载外部配置文件，正在使用默认/.env 配置"}
+    payload = conf.model_dump()
+    payload["active"] = True
+    return payload
