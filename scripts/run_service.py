@@ -82,6 +82,7 @@ def main() -> None:
     args = _parse_args()
 
     conf = load_config(args.config)
+    os.environ["KB_CONFIG_PATH"] = conf._config_path or os.path.abspath(args.config)
     set_current_config(conf)
     apply_env_from_config(conf)
 

@@ -6,6 +6,7 @@ without a TOML file, the legacy defaults (.env fallback) remain in effect.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -17,7 +18,7 @@ from knowledge import KnowledgeService
 from services.conversation_service import ConversationService
 from services.task_manager import TaskManager
 
-from shared.config_loader import get_current_config
+from shared.config_loader import get_current_config, load_config, set_current_config
 from shared.logging_config import configure_logging
 from shared.request_logging import RequestLoggingMiddleware
 
@@ -34,6 +35,15 @@ async def lifespan(app: FastAPI):
 
     # 初始化知识服务（优先使用外部配置）
     conf = get_current_config()
+    if conf is None:
+        config_path = os.getenv("KB_CONFIG_PATH")
+        if config_path:
+            try:
+                conf = load_config(config_path)
+                set_current_config(conf)
+                logging.info("Reload worker loaded config from %s", config_path)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logging.warning("Failed to reload config from %s: %s", config_path, exc)
 
     if conf is not None:
         # Optional: configure LLM from config before KnowledgeService uses Settings

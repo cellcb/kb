@@ -1,10 +1,13 @@
+# baseUrl is provided via tests.http.env.json or http-client.env.json
+@useEnvironment = local
+
 ### RAG 同步查询
-POST http://localhost:8000/api/chat
+POST {{baseUrl}}/api/chat
 Content-Type: application/json
 X-Tenant-ID: 1
 
 {
-  "message": "agent 开发介绍？",
+  "message": "agent 中文回答？",
   "search_params": {
     "top_k": 5,
     "response_mode": "compact"
@@ -12,13 +15,13 @@ X-Tenant-ID: 1
 }
 
 ### RAG 流式查询（SSE）
-POST http://localhost:8000/api/chat/stream
+POST {{baseUrl}}/api/chat/stream
 Content-Type: application/json
 Accept: text/event-stream
 X-Tenant-ID: 1
 
 {
-  "message": "agent 开发介绍",
+  "message": "agent开发介绍 中文回答",
   "search_params": {
     "top_k": 5,
     "response_mode": "compact"
@@ -26,7 +29,7 @@ X-Tenant-ID: 1
 }
 
 ### Elasticsearch 关键字查询
-POST http://localhost:8000/api/search
+POST {{baseUrl}}/api/search
 Content-Type: application/json
 X-Tenant-ID: 1
 
@@ -39,7 +42,7 @@ X-Tenant-ID: 1
 }
 
 ### 外部文档摄取
-POST http://localhost:8000/api/documents/ingest
+POST {{baseUrl}}/api/documents/ingest
 Content-Type: application/json
 X-Tenant-ID: demo-tenant
 
@@ -59,9 +62,9 @@ X-Tenant-ID: demo-tenant
 }
 
 ### 上传文件摄取 (请替换文件路径)
-POST http://localhost:8000/api/documents/ingest/upload
+POST {{baseUrl}}/api/documents/ingest/upload
 Content-Type: multipart/form-data; boundary=BOUNDARY
-X-Tenant-ID: 3
+X-Tenant-ID: 1
 
 --BOUNDARY
 Content-Disposition: form-data; name="files"; filename="/Users/cell/Downloads/狮民肋板水池0915_t3-模型2.docx"
@@ -76,7 +79,7 @@ Content-Type: application/json
 --BOUNDARY--
 
 ### 异步上传文档并指定回调 (请替换文件路径与回调地址)
-POST http://localhost:8000/api/documents/upload
+POST {{baseUrl}}/api/documents/upload
 Content-Type: multipart/form-data; boundary=BOUNDARY
 X-Tenant-ID: demo-tenant
 
@@ -100,5 +103,5 @@ https://example.com/hooks/index-finished
 --BOUNDARY--
 
 ### 根据文档ID删除文档并清理索引
-DELETE http://localhost:8000/api/documents/18
+DELETE {{baseUrl}}/api/documents/18
 X-Tenant-ID: 1

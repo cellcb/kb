@@ -231,6 +231,22 @@ def apply_env_from_config(conf: AppConfig) -> None:
     # Uvicorn host/port also exposed for convenience
     os.environ["APP_HOST"] = conf.server.host
     os.environ["APP_PORT"] = str(conf.server.port)
+    # Propagate Elasticsearch settings so reload workers receive them
+    os.environ["ELASTICSEARCH_URL"] = str(conf.elasticsearch.url)
+    os.environ["ELASTICSEARCH_INDEX"] = str(conf.elasticsearch.index)
+    os.environ["ELASTICSEARCH_TEXT_INDEX"] = str(conf.elasticsearch.text_index)
+    if conf.elasticsearch.user:
+        os.environ["ELASTICSEARCH_USER"] = str(conf.elasticsearch.user)
+    if conf.elasticsearch.password:
+        os.environ["ELASTICSEARCH_PASSWORD"] = str(conf.elasticsearch.password)
+    if conf.elasticsearch.verify_certs is not None:
+        os.environ["ELASTICSEARCH_VERIFY_CERTS"] = "1" if conf.elasticsearch.verify_certs else "0"
+    if conf.elasticsearch.ca_certs:
+        os.environ["ELASTICSEARCH_CA_CERTS"] = str(conf.elasticsearch.ca_certs)
+    if conf.elasticsearch.timeout is not None:
+        os.environ["ELASTICSEARCH_TIMEOUT"] = str(conf.elasticsearch.timeout)
+    if conf.elasticsearch.text_analyzer:
+        os.environ["ELASTICSEARCH_TEXT_ANALYZER"] = str(conf.elasticsearch.text_analyzer)
     # LLM configuration exported so child reload process and libraries relying on env can pick it up
     if conf.llm is not None:
         os.environ["LLM_PROVIDER"] = str(conf.llm.provider)

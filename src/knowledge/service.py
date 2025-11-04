@@ -116,7 +116,21 @@ class KnowledgeService:
             except OSError:
                 # 目标可能位于只读的打包目录，跳过创建
                 pass
-        os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(self.embedding_cache_dir))
+
+        cache_path = str(self.embedding_cache_dir.resolve())
+        cache_env_vars = {
+            "HF_HOME": cache_path,
+            "HUGGINGFACE_HUB_CACHE": cache_path,
+            "TRANSFORMERS_CACHE": cache_path,
+            "HF_DATASETS_CACHE": cache_path,
+            "SENTENCE_TRANSFORMERS_HOME": cache_path,
+        }
+        for name, value in cache_env_vars.items():
+            current = os.getenv(name)
+            if current and Path(current) != self.embedding_cache_dir:
+                self.logger.debug("覆盖 %s=%s -> %s 以统一缓存路径", name, current, value)
+            os.environ[name] = value
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
         def _coerce_bool(value: Optional[object]) -> Optional[bool]:
             if value is None:
@@ -144,11 +158,7 @@ class KnowledgeService:
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
-            self.logger.info("已启用 HuggingFace 离线模式 (仅使用本地缓存)")
-
-        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(self.embedding_cache_dir))
-        os.environ.setdefault("TRANSFORMERS_CACHE", str(self.embedding_cache_dir))
-        os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(self.embedding_cache_dir))
+        self.logger.info("已启用 HuggingFace 离线模式 (仅使用本地缓存)")
 
         self.logger.info("Embedding 缓存目录: %s", self.embedding_cache_dir)
 
@@ -156,7 +166,6 @@ class KnowledgeService:
         self.file_cache_path = self.cache_dir / "file_cache.json"
         self.file_cache = self._load_file_cache()
         self.es_client = None
-
         # 配置 LlamaIndex LLM（优先读取外部配置/环境变量）。
         # 当未提供任何 LLM 相关环境变量时，保留 LlamaIndex 的默认设置。
         try:
@@ -187,8 +196,25 @@ class KnowledgeService:
         Settings.node_parser = SentenceSplitter(chunk_size=1024, chunk_overlap=20)
 
         # Elasticsearch 相关配置
-        self.es_url = es_url or os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
-        self.es_index_template = os.getenv("ELASTICSEARCH_INDEX", es_index)
+        config_es_url = es_url
+        env_es_url = os.getenv("ELASTICSEARCH_URL")
+        self.es_url = config_es_url or env_es_url or "http://localhost:9200"
+        self.logger.info(
+            "Elasticsearch endpoint resolved (config=%r, env=%r, final=%s)",
+            config_es_url,
+            env_es_url,
+            self.es_url,
+        )
+
+        config_es_index = es_index
+        env_es_index = os.getenv("ELASTICSEARCH_INDEX")
+        self.es_index_template = env_es_index or config_es_index
+        if env_es_index:
+            self.logger.info(
+                "Elasticsearch index template overridden by env (env=%r, final=%s)",
+                env_es_index,
+                self.es_index_template,
+            )
         self.es_keyword_index_template = os.getenv("ELASTICSEARCH_TEXT_INDEX", es_keyword_index)
         self.es_user = es_user or os.getenv("ELASTICSEARCH_USER")
         self.es_password = es_password or os.getenv("ELASTICSEARCH_PASSWORD")
@@ -238,6 +264,26 @@ class KnowledgeService:
             return None
 
         return snapshots[0]
+
+    def _resolve_cached_model_path(self, model_name: str) -> Optional[Path]:
+        """Return the snapshot directory for a cached HuggingFace model."""
+
+        cache_dir = getattr(self, "embedding_cache_dir", None)
+        if not cache_dir:
+            return None
+
+        cache_path = Path(cache_dir).resolve()
+        safe_name = model_name.replace("/", "--")
+        base_dir = cache_path / f"models--{safe_name}"
+        snapshot_root = base_dir / "snapshots"
+        if not snapshot_root.exists():
+            return None
+
+        snapshots = sorted([p for p in snapshot_root.iterdir() if p.is_dir()])
+        if not snapshots:
+            return None
+
+        return snapshots[-1].resolve()
 
     def _get_es_kwargs(self) -> Dict[str, Any]:
         """构建 Elasticsearch 连接参数"""
@@ -512,36 +558,78 @@ class KnowledgeService:
             self.logger.info(f"使用模型: {model_info[model_name]}")
 
         cache_folder = str(self.embedding_cache_dir)
+        cache_root = Path(cache_folder).resolve()
 
-        resolved_model = Path(model_name)
-        if resolved_model.exists():
-            model_name = str(resolved_model.resolve())
-            self.logger.info("检测到本地embedding模型目录: %s", model_name)
-        else:
-            bundled_path = self._resolve_bundled_model_path(model_name)
+        def _is_within(base: Path, target: Path) -> bool:
+            try:
+                target.relative_to(base)
+                return True
+            except ValueError:
+                return False
+
+        def _resolve_model_path(name: str) -> str:
+            path_candidate = Path(name)
+            if path_candidate.exists():
+                resolved_path = path_candidate.resolve()
+                if _is_within(cache_root, resolved_path):
+                    self.logger.info("检测到缓存embedding模型目录: %s", resolved_path)
+                    return str(resolved_path)
+
+                if self._bundled_model_root and _is_within(self._bundled_model_root.resolve(), resolved_path):
+                    self.logger.info("使用打包embedding模型目录: %s", resolved_path)
+                    return str(resolved_path)
+
+                raise FileNotFoundError(
+                    f"模型目录 {resolved_path} 不在受允许的缓存目录 {cache_root} 内"
+                )
+
+            bundled_path = self._resolve_bundled_model_path(name)
             if bundled_path is not None:
-                model_name = str(bundled_path)
-                self.logger.info("使用打包embedding模型目录: %s", model_name)
+                resolved = str(bundled_path)
+                self.logger.info("使用打包embedding模型目录: %s", resolved)
+                return resolved
+
+            cached_path = self._resolve_cached_model_path(name)
+            if cached_path is not None:
+                resolved = str(cached_path)
+                self.logger.info("使用缓存embedding模型目录: %s", resolved)
+                return resolved
+
+            if self.embedding_local_files_only:
+                raise FileNotFoundError(
+                    f"离线模式下未找到本地缓存的模型 {name}. 请确认其已存在于 {self.embedding_cache_dir}."
+                )
+
+            return name
+
+        def _build_embedding(name: str) -> HuggingFaceEmbedding:
+            resolved_name = _resolve_model_path(name)
+            kwargs = {
+                "model_name": resolved_name,
+                "cache_folder": cache_folder,
+            }
+            if self.embedding_local_files_only:
+                kwargs["local_files_only"] = True
+            return HuggingFaceEmbedding(**kwargs)
 
         try:
-            Settings.embed_model = HuggingFaceEmbedding(
-                model_name=model_name,
-                cache_folder=cache_folder,
-            )
+            Settings.embed_model = _build_embedding(model_name)
             self.logger.info("Embedding模型加载成功")
         except Exception as e:
             self.logger.error(f"加载embedding模型失败: {e}")
+            if self.embedding_local_files_only:
+                raise RuntimeError(
+                    "离线模式下加载embedding模型失败，请确认模型缓存完整可用。"
+                ) from e
+
             self.logger.info("尝试使用默认的轻量级模型...")
             fallback_name = "sentence-transformers/all-MiniLM-L6-v2"
-            bundled_fallback = self._resolve_bundled_model_path(fallback_name)
-            if bundled_fallback is not None:
-                fallback_name = str(bundled_fallback)
-                self.logger.info("使用打包默认模型目录: %s", fallback_name)
-
-            Settings.embed_model = HuggingFaceEmbedding(
-                model_name=fallback_name,
-                cache_folder=cache_folder,
-            )
+            try:
+                Settings.embed_model = _build_embedding(fallback_name)
+                self.logger.info("默认轻量级Embedding模型加载成功")
+            except Exception as fallback_exc:
+                self.logger.error(f"加载默认Embedding模型同样失败: {fallback_exc}")
+                raise
 
     def _init_vector_store(
         self, tenant_id: Optional[str] = None, force: bool = False
@@ -1553,15 +1641,26 @@ class KnowledgeService:
         )
 
         # Prefer async query interface when available to avoid blocking and timeout issues
+        response = None
         if hasattr(query_engine, "aquery"):
-            response = await query_engine.aquery(question)
-        else:
+            try:
+                response = await query_engine.aquery(question)
+            except RuntimeError as exc:
+                error_text = str(exc)
+                if "Timeout context manager should be used inside a task" in error_text:
+                    # LlamaIndex async query occasionally fails when its asyncio timeout helper is
+                    # invoked outside a Task (observed under uvicorn/asyncio on Python 3.11+).
+                    # Fall back to the thread executor to avoid surfacing a 500 to callers.
+                    self.logger.warning(
+                        "Async query failed due to invalid asyncio context, fallback to sync: %s",
+                        error_text,
+                    )
+                else:
+                    raise
+
+        if response is None:
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                query_engine.query,
-                question,
-            )
+            response = await loop.run_in_executor(None, query_engine.query, question)
 
         sources = self._format_sources_from_nodes(response)
         raw_answer = str(response).strip()

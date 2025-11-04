@@ -130,7 +130,9 @@ curl http://localhost:8000/api/status
 ### 模型离线缓存
 
 - 运行过程中会自动将 HuggingFace 模型缓存到 `storage/models/`（可通过 `EMBEDDING_CACHE_DIR` 自定义目录）。
-- 将模型手动下载至该目录后，可设置 `EMBEDDING_LOCAL_FILES_ONLY=1` 或在命令中传入 `--embedding-local-files-only`，即可脱离外网使用。
+- 应用启动时会统一设置 `HF_HOME`、`HUGGINGFACE_HUB_CACHE`、`TRANSFORMERS_CACHE`、`HF_DATASETS_CACHE`、`SENTENCE_TRANSFORMERS_HOME` 指向该目录，避免散落在默认的 `~/.cache`。
+- 将模型手动下载至该目录后，可设置 `EMBEDDING_LOCAL_FILES_ONLY=1` 或在命令中传入 `--embedding-local-files-only`，即可脱离外网使用；此时自动启用 `HF_HUB_OFFLINE`、`TRANSFORMERS_OFFLINE` 等环境变量。
+- 离线部署请确保将整个 `storage/models/` 目录一并同步到目标主机（或镜像），容器启动时挂载 `-v $(pwd)/storage/models:/app/storage/models` 即可复用缓存。
 - API 服务会复用缓存目录，避免重复下载。
 
 ## 📁 项目结构

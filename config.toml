@@ -27,10 +27,9 @@ max_workers = 4
 # Embeddings (externalized; not bundled in the executable)
 embedding_model = "BAAI/bge-small-zh-v1.5"
 embedding_cache_dir = "storage/models"
-embedding_local_files_only = false   # set true if running fully offline
-
+embedding_local_files_only = true   # set true if running fully offline
 [elasticsearch]
-url = "http://localhost:9200"
+url = "http://192.168.100.104:9200"
 index = "kb-documents"              # actual index -> "<tenant>-kb-documents"
 text_index = "kb-documents-text"     # actual index -> "<tenant>-kb-documents-text"
 # user = "elastic"                   # uncomment if basic auth is used
@@ -48,7 +47,7 @@ max_concurrent_tasks = 3
 provider = "openai_like"
 api_base = "https://ark.cn-beijing.volces.com/api/v3"
 api_key = "155d5cb5-6b83-4d52-8be8-eb795c72ad44"
-model = "deepseek-v3-250324"
+model = "deepseek-v3-1-250821"
 #model = "DeepSeek-V3.1"
 temperature = 0.1
 is_chat_model = true

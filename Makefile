@@ -1,7 +1,9 @@
 # RAG Demo Makefile (使用 uv)
 # 常用开发命令的快捷方式
 
-.PHONY: help install dev start start-uv start-uv-noreload start-c start-c-reload test clean format lint build docker dist dist-native dist-x86_64
+.PHONY: help install dev start start-uv start-uv-noreload start-c start-c-reload test clean format lint build \
+	docker docker-native docker-x86_64 docker-dev-x86_64 docker-dev-run-x86_64 docker-push dist dist-native dist-x86_64 \
+	package-wheel deploy deploy-wp
 
 DIST_ENTRY ?= scripts/run_service.py
 DIST_NAME ?= kb-service
@@ -19,6 +21,35 @@ PYINSTALLER ?= uv run pyinstaller
 
 # Config file path (relative to project root by default)
 CONFIG ?= ./config.toml
+
+# Docker image information
+IMAGE_NAME ?= kb-api
+IMAGE_TAG ?= latest
+IMAGE_REGISTRY ?=
+IMAGE_FULL_NAME := $(if $(IMAGE_REGISTRY),$(IMAGE_REGISTRY)/)$(IMAGE_NAME):$(IMAGE_TAG)
+
+# Dev container image information
+DEV_IMAGE_NAME ?= kb-api-dev
+DEV_IMAGE_TAG ?= amd64
+DEV_IMAGE_REGISTRY ?=$(IMAGE_REGISTRY)
+DEV_IMAGE_FULL_NAME := $(if $(DEV_IMAGE_REGISTRY),$(DEV_IMAGE_REGISTRY)/)$(DEV_IMAGE_NAME):$(DEV_IMAGE_TAG)
+DEV_CONTAINER_NAME ?= kb-api-dev
+
+# Deployment configuration
+DEPLOY_HOST ?= wp
+DEPLOY_PATH ?= /opt/water/apps/kb
+DEPLOY_SOURCE ?= .
+DEPLOY_TARBALL ?= /tmp/kb-deploy.tar.gz
+DEPLOY_EXCLUDES ?= --exclude=".git" \
+	--exclude=".venv" \
+	--exclude="__pycache__" \
+	--exclude="*.pyc" \
+	--exclude="dist" \
+	--exclude="build" \
+	--exclude="storage" \
+	--exclude="config.toml" \
+	--exclude=".mypy_cache" \
+	--exclude=".pytest_cache"
 
 # Set X86_64_PYTHON to the interpreter capable of producing x86_64 binaries.
 # Example: X86_64_PYTHON="/usr/bin/arch -x86_64 python3"
@@ -88,6 +119,11 @@ build:  ## 构建项目
 	uv build
 	@echo "✅ 项目构建完成"
 
+package-wheel:  ## 生成 wheel 包
+	@echo "📦 构建 wheel 包..."
+	uv build && ls -1 dist/*.whl
+	@echo "✅ Wheel 包已生成"
+
 dist: dist-native dist-x86_64  ## 打包成本机和x86_64可执行文件
 
 dist-native:  ## 使用本机架构生成可执行文件
@@ -117,16 +153,70 @@ dist-x86_64:  ## 使用x86_64架构生成可执行文件（需要Rosetta或x86_6
 
 docker:  ## 构建Docker镜像
 	@echo "🐳 构建Docker镜像..."
-	docker build -t rag-demo-api .
+	docker build -t $(IMAGE_FULL_NAME) .
 	@echo "✅ Docker镜像构建完成"
 
 docker-run:  ## 运行Docker容器
 	@echo "🐳 运行Docker容器..."
-	docker run -p 8000:8000 -v $(PWD)/data:/app/data -v $(PWD)/storage:/app/storage rag-demo-api
+	docker run -p 8000:8000 -v $(PWD)/data:/app/data -v $(PWD)/storage:/app/storage $(IMAGE_FULL_NAME)
 
 docker-compose:  ## 使用docker-compose启动
 	@echo "🐳 使用docker-compose启动..."
 	docker-compose up --build
+
+docker-native:  ## 构建本机架构 Docker 镜像
+	@echo "🐳 构建本机架构Docker镜像..."
+	docker build --platform $(shell docker info --format '{{.OSType}}/{{.Architecture}}') -t $(IMAGE_FULL_NAME) .
+	@echo "✅ 本机架构Docker镜像构建完成"
+
+docker-x86_64:  ## 构建 x86_64 Docker 镜像
+	@echo "🐳 构建x86_64架构Docker镜像..."
+	docker build --platform linux/amd64 -t $(IMAGE_FULL_NAME)-amd64 .
+	@echo "✅ x86_64 Docker镜像构建完成"
+
+docker-dev-x86_64:  ## 构建 x86_64 开发容器镜像
+	@echo "🐳 构建x86_64开发镜像..."
+	docker build --platform linux/amd64 --target dev -t $(DEV_IMAGE_FULL_NAME) .
+	@echo "✅ 开发镜像构建完成: $(DEV_IMAGE_FULL_NAME)"
+
+docker-dev-run-x86_64: docker-dev-x86_64 ## 运行 x86_64 开发容器（依赖安装在容器内，挂载源码）
+	@echo "🛠️  启动开发容器..."
+	mkdir -p $(PWD)/data $(PWD)/storage
+	docker run --rm -it \
+		--platform linux/amd64 \
+		-p 8000:8000 \
+		-v $(PWD)/src:/app/src \
+		-v $(PWD)/pyproject.toml:/app/pyproject.toml \
+		-v $(PWD)/uv.lock:/app/uv.lock:ro \
+		-v $(PWD)/config.toml:/app/config/config.toml:ro \
+		-v $(PWD)/env.example:/app/config/.env.example:ro \
+		-v $(PWD)/data:/app/data \
+		-v $(PWD)/storage:/app/storage \
+		--name $(DEV_CONTAINER_NAME) \
+		$(DEV_IMAGE_FULL_NAME) bash
+
+docker-push:  ## 推送镜像 (需先构建)
+	@if [ -z "$(IMAGE_REGISTRY)" ]; then \
+		echo "⚠️  未设置 IMAGE_REGISTRY，跳过推送。"; \
+	else \
+		echo "🚢 推送镜像到 $(IMAGE_REGISTRY)..."; \
+		docker push $(IMAGE_FULL_NAME); \
+		echo "✅ 镜像已推送"; \
+	fi
+
+deploy:  ## 部署代码到目标主机目录
+	@echo "🚚 部署到 $(DEPLOY_HOST):$(DEPLOY_PATH)..."
+	@echo "📦 打包部署文件..."
+	COPYFILE_DISABLE=1 gtar --format=gnu --no-xattrs --no-acls -czf $(DEPLOY_TARBALL) $(DEPLOY_EXCLUDES) -C $(DEPLOY_SOURCE) .
+	@echo "📤 传输到远端..."
+	scp $(DEPLOY_TARBALL) $(DEPLOY_HOST):$(DEPLOY_TARBALL)
+	@echo "🗂️  解压部署包..."
+	ssh $(DEPLOY_HOST) "mkdir -p $(DEPLOY_PATH) && tar xzf $(DEPLOY_TARBALL) -C $(DEPLOY_PATH) && rm -f $(DEPLOY_TARBALL)"
+	rm -f $(DEPLOY_TARBALL)
+	@echo "✅ 部署完成"
+
+deploy-wp:  ## 部署代码到 wp:/opt/water/apps/kb
+	@$(MAKE) deploy DEPLOY_HOST=wp DEPLOY_PATH=/opt/water/apps/kb
 
 info:  ## 显示项目信息
 	@echo "📊 项目信息"
